@@ -48,23 +48,32 @@ python scanner.py
 
 ### 方式3: 处理违规图片
 
-扫描完成后，使用专用工具处理违规图片：
+扫描完成后，使用专用工具处理违规图片（基于MinIO权限控制）：
 
 ```bash
 # 第1步: 查看所有违规图片
 python handle_violations.py list
 
-# 第2步: 重命名违规图片为 .__del__（安全删除第一步）
-python handle_violations.py rename --type gambling
+# 第2步: 标记违规图片为blocked（设置MinIO标签）
+python handle_violations.py block --type gambling
 
-# 第3步: 检查是否有误判，恢复误判文件
+# 第3步: 查看被blocked的文件
+python handle_violations.py list-blocked
+
+# 第4步: 如有误判，恢复文件
 python handle_violations.py restore --ids 1,2,3
 
-# 第4步: 确认无误后，彻底删除
-python handle_violations.py delete-del
+# 第5步: 确认无误后，彻底删除
+python handle_violations.py delete-blocked
 ```
 
-**详细说明**: [docs/HANDLE_VIOLATIONS_GUIDE.md](docs/HANDLE_VIOLATIONS_GUIDE.md)
+**优势**：
+- ✅ 文件路径保持不变
+- ✅ URL不受影响
+- ✅ 可快速恢复
+- ✅ 性能更好
+
+**详细说明**: [docs/VIOLATION_HANDLING_PERMISSIONS.md](docs/VIOLATION_HANDLING_PERMISSIONS.md)
 
 ## 📋 必要配置
 

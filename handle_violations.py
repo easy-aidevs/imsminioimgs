@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
 违规图片处理工具
-支持重命名、恢复和彻底删除违规图片
+支持通过MinIO对象标签标记违规图片、恢复和彻底删除
 
 工作流程：
-1. 扫描并标记违规图片
-2. 重命名违规图片为 .__del__ 后缀（可恢复）
-3. 确认无误后，彻底删除 .__del__ 文件
-4. 如有误判，可恢复文件
+1. 扫描并标记违规图片（设置对象标签为blocked）
+2. 被标记的图片无法公开访问（相当于private）
+3. 确认无误后，可彻底删除或恢复误判文件
 """
 
 import os
@@ -49,8 +48,18 @@ class ViolationHandler:
     
     def get_violations(self, violation_type: str = None, 
                       confidence_threshold: float = 0.0,
-                      exclude_del: bool = True) -> List[Dict]:
-        """获取违规图片列表"""
+                      exclude_blocked: bool = True) -> List[Dict]:
+        """
+        获取违规图片列表
+        
+        Args:
+            violation_type: 违规类型过滤，None表示所有类型
+            confidence_threshold: 置信度阈值
+            exclude_blocked: 是否排除已blocked的文件
+            
+        Returns:
+            违规图片列表
+        """
         query = """
             SELECT id, bucket_name, object_key, violation_type, 
                    violation_label, confidence, `key`
@@ -67,131 +76,141 @@ class ViolationHandler:
             query += " AND confidence >= %s"
             params.append(confidence_threshold)
         
-        if exclude_del:
-            query += " AND object_key NOT LIKE '%.__del__%'"
+        if exclude_blocked:
+            query += " AND (blocked IS NULL OR blocked = 0)"
         
         query += " ORDER BY violation_type, confidence DESC"
         
         return self.db.execute_query(query, tuple(params), fetch=True)
     
-    def get_del_files(self) -> List[Dict]:
-        """获取所有已标记为.__del__的文件"""
+    def get_blocked_files(self) -> List[Dict]:
+        """获取所有被blocked的文件"""
         query = """
             SELECT id, bucket_name, object_key, violation_type, confidence
             FROM image_scan_records
-            WHERE object_key LIKE '%.__del__%'
+            WHERE blocked = 1
             ORDER BY updated_at DESC
         """
         return self.db.execute_query(query, fetch=True)
     
-    def rename_to_del(self, violations: List[Dict], dry_run: bool = False) -> Dict:
-        """将违规图片重命名为 .__del__ 后缀"""
+    def block_violations(self, violations: List[Dict], dry_run: bool = False) -> Dict:
+        """
+        将违规图片标记为blocked（通过MinIO标签）
+        
+        Args:
+            violations: 违规图片列表
+            dry_run: 是否仅预览不执行
+            
+        Returns:
+            操作统计
+        """
         stats = {'success': 0, 'failed': 0, 'skipped': 0}
         
-        logger.info(f"开始重命名 {len(violations)} 张图片为 .__del__ 后缀")
+        logger.info(f"开始标记 {len(violations)} 张违规图片为blocked状态")
         if dry_run:
             logger.warning("[DRY RUN] 仅预览，不会实际执行")
         
         for i, v in enumerate(violations, 1):
-            old_key = v['object_key']
+            object_key = v['object_key']
             bucket = v['bucket_name']
             
-            # 生成新文件名
-            if old_key.endswith('.__del__'):
-                logger.debug(f"跳过已标记的文件: {old_key}")
-                stats['skipped'] += 1
-                continue
-            
-            new_key = old_key + '.__del__'
-            
             try:
+                # 检查当前状态
+                acl_info = self.minio.get_object_acl(bucket, object_key)
+                if acl_info.get('is_blocked'):
+                    logger.debug(f"跳过已标记的文件: {object_key}")
+                    stats['skipped'] += 1
+                    continue
+                
                 if not dry_run:
-                    # 1. 复制文件到新名称
-                    data = self.minio.get_object_data(bucket, old_key)
-                    self.minio.upload_object(bucket, new_key, data)
+                    # 设置对象为blocked状态
+                    self.minio.set_object_acl(bucket, object_key, 'private')
                     
-                    # 2. 删除原文件
-                    self.minio.remove_object(bucket, old_key)
-                    
-                    # 3. 更新数据库记录
+                    # 更新数据库记录
                     self.db.execute_query(
-                        "UPDATE image_scan_records SET object_key = %s, updated_at = NOW() WHERE id = %s",
-                        (new_key, v['id'])
+                        "UPDATE image_scan_records SET blocked = 1, updated_at = NOW() WHERE id = %s",
+                        (v['id'],)
                     )
                     self.db.connection.commit()
                 
                 stats['success'] += 1
-                logger.info(f"[{i}/{len(violations)}] ✓ {old_key} → {new_key}")
+                logger.info(f"[{i}/{len(violations)}] ✓ {object_key} -> BLOCKED")
                 
             except Exception as e:
                 stats['failed'] += 1
-                logger.error(f"[{i}/{len(violations)}] ✗ {old_key} - {str(e)}")
+                logger.error(f"[{i}/{len(violations)}] ✗ {object_key} - {str(e)}")
         
         return stats
     
-    def restore_from_del(self, del_files: List[Dict], dry_run: bool = False) -> Dict:
-        """恢复 .__del__ 文件到原始名称"""
+    def restore_blocked(self, blocked_files: List[Dict], dry_run: bool = False) -> Dict:
+        """
+        恢复被block的图片（移除blocked标签）
+        
+        Args:
+            blocked_files: 被block的文件列表
+            dry_run: 是否仅预览不执行
+            
+        Returns:
+            操作统计
+        """
         stats = {'success': 0, 'failed': 0, 'skipped': 0}
         
-        logger.info(f"开始恢复 {len(del_files)} 张 .__del__ 文件")
+        logger.info(f"开始恢复 {len(blocked_files)} 张被block的图片")
         if dry_run:
             logger.warning("[DRY RUN] 仅预览，不会实际执行")
         
-        for i, f in enumerate(del_files, 1):
-            del_key = f['object_key']
+        for i, f in enumerate(blocked_files, 1):
+            object_key = f['object_key']
             bucket = f['bucket_name']
-            
-            # 恢复原始文件名
-            if not del_key.endswith('.__del__'):
-                logger.debug(f"跳过非.__del__文件: {del_key}")
-                stats['skipped'] += 1
-                continue
-            
-            original_key = del_key[:-8]  # 移除 .__del__
             
             try:
                 if not dry_run:
-                    # 1. 复制文件回原始名称
-                    data = self.minio.get_object_data(bucket, del_key)
-                    self.minio.upload_object(bucket, original_key, data)
+                    # 恢复对象为正常状态
+                    self.minio.set_object_acl(bucket, object_key, 'public')
                     
-                    # 2. 删除.__del__文件
-                    self.minio.remove_object(bucket, del_key)
-                    
-                    # 3. 更新数据库记录
+                    # 更新数据库记录
                     self.db.execute_query(
-                        "UPDATE image_scan_records SET object_key = %s, is_violation = 0, updated_at = NOW() WHERE id = %s",
-                        (original_key, f['id'])
+                        "UPDATE image_scan_records SET blocked = 0, is_violation = 0, updated_at = NOW() WHERE id = %s",
+                        (f['id'],)
                     )
                     self.db.connection.commit()
                 
                 stats['success'] += 1
-                logger.info(f"[{i}/{len(del_files)}] ✓ {del_key} → {original_key}")
+                logger.info(f"[{i}/{len(blocked_files)}] ✓ {object_key} -> RESTORED")
                 
             except Exception as e:
                 stats['failed'] += 1
-                logger.error(f"[{i}/{len(del_files)}] ✗ {del_key} - {str(e)}")
+                logger.error(f"[{i}/{len(blocked_files)}] ✗ {object_key} - {str(e)}")
         
         return stats
     
-    def delete_del_files(self, del_files: List[Dict], dry_run: bool = False) -> Dict:
-        """彻底删除 .__del__ 文件"""
+    def delete_blocked(self, blocked_files: List[Dict], dry_run: bool = False) -> Dict:
+        """
+        彻底删除被block的图片
+        
+        Args:
+            blocked_files: 被block的文件列表
+            dry_run: 是否仅预览不执行
+            
+        Returns:
+            操作统计
+        """
         stats = {'success': 0, 'failed': 0}
         
-        logger.warning(f"准备彻底删除 {len(del_files)} 张 .__del__ 文件（不可恢复！）")
+        logger.warning(f"准备彻底删除 {len(blocked_files)} 张被block的图片（不可恢复！）")
         if dry_run:
             logger.warning("[DRY RUN] 仅预览，不会实际执行")
         
-        for i, f in enumerate(del_files, 1):
-            del_key = f['object_key']
+        for i, f in enumerate(blocked_files, 1):
+            object_key = f['object_key']
             bucket = f['bucket_name']
             
             try:
                 if not dry_run:
-                    # 1. 从MinIO删除文件
-                    self.minio.remove_object(bucket, del_key)
+                    # 从MinIO删除文件
+                    self.minio.remove_object(bucket, object_key)
                     
-                    # 2. 从数据库删除记录
+                    # 从数据库删除记录
                     self.db.execute_query(
                         "DELETE FROM image_scan_records WHERE id = %s",
                         (f['id'],)
@@ -199,11 +218,11 @@ class ViolationHandler:
                     self.db.connection.commit()
                 
                 stats['success'] += 1
-                logger.info(f"[{i}/{len(del_files)}] ✓ 已删除: {del_key}")
+                logger.info(f"[{i}/{len(blocked_files)}] ✓ 已删除: {object_key}")
                 
             except Exception as e:
                 stats['failed'] += 1
-                logger.error(f"[{i}/{len(del_files)}] ✗ {del_key} - {str(e)}")
+                logger.error(f"[{i}/{len(blocked_files)}] ✗ {object_key} - {str(e)}")
         
         return stats
     
@@ -240,26 +259,26 @@ def main():
   # 预览赌博类违规图片
   python handle_violations.py list --type gambling
   
-  # 重命名违规图片为.__del__（预览模式）
-  python handle_violations.py rename --dry-run
+  # 标记违规图片为blocked（预览模式）
+  python handle_violations.py block --dry-run
   
-  # 重命名所有赌博类违规图片
-  python handle_violations.py rename --type gambling
+  # 标记所有赌博类违规图片为blocked
+  python handle_violations.py block --type gambling
   
-  # 查看已标记为.__del__的文件
-  python handle_violations.py list-del
+  # 查看已被blocked的文件
+  python handle_violations.py list-blocked
   
-  # 恢复所有.__del__文件（预览模式）
+  # 恢复被blocked的文件（预览模式）
   python handle_violations.py restore --dry-run
   
-  # 恢复指定的.__del__文件
+  # 恢复指定的被blocked文件
   python handle_violations.py restore --ids 1,2,3
   
-  # 彻底删除所有.__del__文件（危险操作！）
-  python handle_violations.py delete-del
+  # 彻底删除所有被blocked的文件（危险操作！）
+  python handle_violations.py delete-blocked
   
-  # 彻底删除指定的.__del__文件
-  python handle_violations.py delete-del --ids 1,2,3
+  # 彻底删除指定的被blocked文件
+  python handle_violations.py delete-blocked --ids 1,2,3
         """
     )
     
@@ -270,22 +289,22 @@ def main():
     list_parser.add_argument('--type', help='违规类型过滤')
     list_parser.add_argument('--confidence', type=float, default=0.0, help='置信度阈值')
     
-    # rename 命令
-    rename_parser = subparsers.add_parser('rename', help='重命名违规图片为.__del__')
-    rename_parser.add_argument('--type', help='违规类型过滤')
-    rename_parser.add_argument('--confidence', type=float, default=0.0, help='置信度阈值')
-    rename_parser.add_argument('--dry-run', action='store_true', help='仅预览不执行')
+    # block 命令（替代rename）
+    block_parser = subparsers.add_parser('block', help='标记违规图片为blocked状态')
+    block_parser.add_argument('--type', help='违规类型过滤')
+    block_parser.add_argument('--confidence', type=float, default=0.0, help='置信度阈值')
+    block_parser.add_argument('--dry-run', action='store_true', help='仅预览不执行')
     
-    # list-del 命令
-    list_del_parser = subparsers.add_parser('list-del', help='列出已标记为.__del__的文件')
+    # list-blocked 命令（替代list-del）
+    list_blocked_parser = subparsers.add_parser('list-blocked', help='列出已被blocked的文件')
     
     # restore 命令
-    restore_parser = subparsers.add_parser('restore', help='恢复.__del__文件')
+    restore_parser = subparsers.add_parser('restore', help='恢复被blocked的文件')
     restore_parser.add_argument('--ids', help='要恢复的记录ID，逗号分隔')
     restore_parser.add_argument('--dry-run', action='store_true', help='仅预览不执行')
     
-    # delete-del 命令
-    delete_parser = subparsers.add_parser('delete-del', help='彻底删除.__del__文件')
+    # delete-blocked 命令（替代delete-del）
+    delete_parser = subparsers.add_parser('delete-blocked', help='彻底删除被blocked的文件')
     delete_parser.add_argument('--ids', help='要删除的记录ID，逗号分隔')
     delete_parser.add_argument('--dry-run', action='store_true', help='仅预览不执行')
     
@@ -305,7 +324,7 @@ def main():
             )
             handler.preview_violations(violations)
         
-        elif args.command == 'rename':
+        elif args.command == 'block':
             violations = handler.get_violations(
                 violation_type=args.type,
                 confidence_threshold=args.confidence
@@ -322,31 +341,32 @@ def main():
                 return
             
             # 确认操作
-            confirm = input(f"确认重命名 {len(violations)} 张图片为 .__del__？(yes/no): ")
+            confirm = input(f"确认标记 {len(violations)} 张图片为blocked状态？(yes/no): ")
             if confirm.lower() != 'yes':
                 print("已取消")
                 return
             
-            stats = handler.rename_to_del(violations, dry_run=False)
-            print(f"\n重命名完成:")
+            stats = handler.block_violations(violations, dry_run=False)
+            print(f"\n标记完成:")
             print(f"  成功: {stats['success']}")
             print(f"  失败: {stats['failed']}")
             print(f"  跳过: {stats['skipped']}")
         
-        elif args.command == 'list-del':
-            del_files = handler.get_del_files()
+        elif args.command == 'list-blocked':
+            blocked_files = handler.get_blocked_files()
             
-            if not del_files:
-                print("没有找到 .__del__ 文件")
+            if not blocked_files:
+                print("没有被blocked的文件")
                 return
             
-            print(f"\n找到 {len(del_files)} 个 .__del__ 文件:\n")
+            print(f"\n找到 {len(blocked_files)} 个被blocked的文件:\n")
             print(f"{'ID':<6} {'类型':<12} {'置信度':<8} {'文件路径'}")
             print("-" * 80)
             
-            for f in del_files:
+            for f in blocked_files:
                 print(f"{f['id']:<6} {f['violation_type']:<12} "
                       f"{f['confidence']:<8.2f} {f['bucket_name']}/{f['object_key']}")
+            
             print()
         
         elif args.command == 'restore':
@@ -356,20 +376,19 @@ def main():
                 query = f"""
                     SELECT id, bucket_name, object_key, violation_type, confidence
                     FROM image_scan_records
-                    WHERE id IN ({placeholders}) AND object_key LIKE '%.__del__%'
+                    WHERE id IN ({placeholders}) AND blocked = 1
                 """
-                del_files = handler.db.execute_query(query, tuple(ids), fetch=True)
+                blocked_files = handler.db.execute_query(query, tuple(ids), fetch=True)
             else:
-                del_files = handler.get_del_files()
+                blocked_files = handler.get_blocked_files()
             
-            if not del_files:
-                print("没有找到符合条件的 .__del__ 文件")
+            if not blocked_files:
+                print("没有找到符合条件的被blocked文件")
                 return
             
-            print(f"\n准备恢复 {len(del_files)} 个文件:\n")
-            for f in del_files:
-                original = f['object_key'][:-8]
-                print(f"  {f['object_key']} → {original}")
+            print(f"\n准备恢复 {len(blocked_files)} 个被blocked的文件:\n")
+            for f in blocked_files:
+                print(f"  {f['bucket_name']}/{f['object_key']}")
             print()
             
             if args.dry_run:
@@ -377,36 +396,36 @@ def main():
                 return
             
             # 确认操作
-            confirm = input(f"确认恢复 {len(del_files)} 个文件？(yes/no): ")
+            confirm = input(f"确认恢复 {len(blocked_files)} 个文件？(yes/no): ")
             if confirm.lower() != 'yes':
                 print("已取消")
                 return
             
-            stats = handler.restore_from_del(del_files, dry_run=False)
+            stats = handler.restore_blocked(blocked_files, dry_run=False)
             print(f"\n恢复完成:")
             print(f"  成功: {stats['success']}")
             print(f"  失败: {stats['failed']}")
             print(f"  跳过: {stats['skipped']}")
         
-        elif args.command == 'delete-del':
+        elif args.command == 'delete-blocked':
             if args.ids:
                 ids = [int(x.strip()) for x in args.ids.split(',')]
                 placeholders = ','.join(['%s'] * len(ids))
                 query = f"""
                     SELECT id, bucket_name, object_key, violation_type, confidence
                     FROM image_scan_records
-                    WHERE id IN ({placeholders}) AND object_key LIKE '%.__del__%'
+                    WHERE id IN ({placeholders}) AND blocked = 1
                 """
-                del_files = handler.db.execute_query(query, tuple(ids), fetch=True)
+                blocked_files = handler.db.execute_query(query, tuple(ids), fetch=True)
             else:
-                del_files = handler.get_del_files()
+                blocked_files = handler.get_blocked_files()
             
-            if not del_files:
-                print("没有找到符合条件的 .__del__ 文件")
+            if not blocked_files:
+                print("没有找到符合条件的被blocked文件")
                 return
             
-            print(f"\n⚠️  警告：即将彻底删除 {len(del_files)} 个文件（不可恢复！）\n")
-            for f in del_files:
+            print(f"\n⚠️  警告：即将彻底删除 {len(blocked_files)} 个被blocked的文件（不可恢复！）\n")
+            for f in blocked_files:
                 print(f"  {f['bucket_name']}/{f['object_key']}")
             print()
             
@@ -420,7 +439,7 @@ def main():
                 print("已取消")
                 return
             
-            stats = handler.delete_del_files(del_files, dry_run=False)
+            stats = handler.delete_blocked(blocked_files, dry_run=False)
             print(f"\n删除完成:")
             print(f"  成功: {stats['success']}")
             print(f"  失败: {stats['failed']}")

@@ -185,6 +185,7 @@ class ImageSecurityScanner:
                     'violation_description': existing_record.get('violation_description'),
                     'confidence': existing_record.get('confidence'),
                     'suggestion': existing_record.get('suggestion'),
+                    'blocked': 0,  # 默认未block
                     # ⚠️ 关键：不复制ims_result，标记为通过特征匹配识别
                     'ims_result': {
                         'matched_by': 'key_duplicate',  # 通过Key去重识别
@@ -255,6 +256,7 @@ class ImageSecurityScanner:
                         'violation_description': f'与违规图片 {most_similar["object_key"]} 高度相似（汉明距离={distance}）',
                         'confidence': most_similar.get('confidence', 0.9),
                         'suggestion': 'Block',
+                        'blocked': 0,  # 默认未block
                         'ims_result': {'matched_by': 'similarity', 'similar_to': most_similar['object_key'], 'hash_distance': distance},
                         'ims_request_id': None,
                         'scan_status': 'completed',
@@ -303,6 +305,7 @@ class ImageSecurityScanner:
                 'violation_description': ims_result.get('violation_description'),
                 'confidence': ims_result.get('confidence'),
                 'suggestion': ims_result.get('suggestion'),
+                'blocked': 0,  # 默认未block
                 'ims_result': ims_result.get('raw_result'),
                 'ims_request_id': ims_result.get('request_id'),
                 'scan_status': 'completed',

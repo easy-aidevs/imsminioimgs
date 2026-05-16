@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS image_scan_records (
     scan_status VARCHAR(20) DEFAULT 'pending' COMMENT '扫描状态: pending(待扫描)/scanning(扫描中)/completed(已完成)/failed(失败)',
     error_message TEXT DEFAULT NULL COMMENT '错误信息',
     
+    -- 对象访问控制
+    blocked TINYINT(1) DEFAULT 0 COMMENT '是否被block: 0-正常, 1-已block（通过MinIO标签标记）',
+    
     -- 时间戳
     first_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '首次发现时间',
     last_scanned_at DATETIME DEFAULT NULL COMMENT '最后扫描时间',
@@ -47,6 +50,7 @@ CREATE TABLE IF NOT EXISTS image_scan_records (
     INDEX idx_feature_dhash (feature_hash_dhash),
     INDEX idx_bucket_object (bucket_name, object_key(255)),
     INDEX idx_is_violation (is_violation),
+    INDEX idx_blocked (blocked),  -- 用于查询被block的文件
     INDEX idx_violation_type (violation_type),
     INDEX idx_scan_status (scan_status),
     INDEX idx_created_at (created_at),

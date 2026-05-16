@@ -162,3 +162,106 @@ class MinIOClient:
         except S3Error as e:
             logger.error(f"检查存储桶存在性失败: {e}")
             return False
+    
+    def set_object_acl(self, bucket_name: str, object_name: str, acl: str = 'private'):
+        """
+        设置对象访问权限
+        
+        Args:
+            bucket_name: 存储桶名称
+            object_name: 对象名称
+            acl: 访问控制列表 ('private', 'public-read', 'public-read-write', 'authenticated-read')
+        """
+        try:
+            # MinIO使用set_object_tags来标记对象状态，或者通过policy控制
+            # 这里我们使用tagging来标记违规图片
+            from minio.datatypes import ObjectTags
+            
+            if acl == 'private':
+                # 设置为违规状态，添加标签
+                tags = ObjectTags()
+                tags["status"] = "violation"
+                tags["blocked"] = "true"
+                self.client.set_object_tags(bucket_name, object_name, tags)
+                logger.debug(f"设置对象为违规状态: {bucket_name}/{object_name}")
+            elif acl == 'public':
+                # 恢复为正常状态，清除标签
+                self.client.delete_object_tags(bucket_name, object_name)
+                logger.debug(f"恢复对象为正常状态: {bucket_name}/{object_name}")
+            else:
+                raise ValueError(f"不支持的ACL类型: {acl}")
+                
+        except S3Error as e:
+            logger.error(f"设置对象权限失败 [{bucket_name}/{object_name}]: {e}")
+            raise
+    
+    def get_object_acl(self, bucket_name: str, object_name: str) -> dict:
+        """
+        获取对象访问权限状态
+        
+        Args:
+            bucket_name: 存储桶名称
+            object_name: 对象名称
+            
+        Returns:
+            dict: 包含权限状态的字典
+        """
+        try:
+            tags = self.client.get_object_tags(bucket_name, object_name)
+            is_blocked = tags.get("blocked", "false") == "true"
+            status = tags.get("status", "normal")
+            
+            return {
+                "is_blocked": is_blocked,
+                "status": status,
+                "tags": dict(tags)
+            }
+        except S3Error as e:
+            # 如果没有标签，说明是正常对象
+            if "NoSuchTagSet" in str(e):
+                return {
+                    "is_blocked": False,
+                    "status": "normal",
+                    "tags": {}
+                }
+            logger.error(f"获取对象权限失败 [{bucket_name}/{object_name}]: {e}")
+            raise
+    
+    def remove_object(self, bucket_name: str, object_name: str):
+        """
+        删除对象
+        
+        Args:
+            bucket_name: 存储桶名称
+            object_name: 对象名称
+        """
+        try:
+            self.client.remove_object(bucket_name, object_name)
+            logger.debug(f"已删除对象: {bucket_name}/{object_name}")
+        except S3Error as e:
+            logger.error(f"删除对象失败 [{bucket_name}/{object_name}]: {e}")
+            raise
+    
+    def upload_object(self, bucket_name: str, object_name: str, data: bytes, content_type: str = None):
+        """
+        上传对象
+        
+        Args:
+            bucket_name: 存储桶名称
+            object_name: 对象名称
+            data: 对象数据
+            content_type: MIME类型
+        """
+        from io import BytesIO
+        try:
+            self.client.put_object(
+                bucket_name,
+                object_name,
+                BytesIO(data),
+                length=len(data),
+                content_type=content_type or 'application/octet-stream'
+            )
+            logger.debug(f"已上传对象: {bucket_name}/{object_name}")
+        except S3Error as e:
+            logger.error(f"上传对象失败 [{bucket_name}/{object_name}]: {e}")
+            raise
