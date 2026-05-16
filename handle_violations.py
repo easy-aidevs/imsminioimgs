@@ -15,10 +15,13 @@ import argparse
 from datetime import datetime
 from typing import List, Dict
 from dotenv import load_dotenv
-from loguru import logger
 
 # 加载环境变量
 load_dotenv()
+
+# 导入日志配置
+from logger_config import setup_logger
+logger = setup_logger(log_dir="logs")
 
 from database import ImageDatabase
 from minio_client import MinIOClient
@@ -106,39 +109,59 @@ class ViolationHandler:
         """
         stats = {'success': 0, 'failed': 0, 'skipped': 0}
         
-        logger.info(f"开始标记 {len(violations)} 张违规图片为blocked状态")
+        logger.info("="*80)
+        logger.info("开始标记违规图片为blocked状态")
+        logger.info(f"  - 待处理数量: {len(violations)}")
+        logger.info(f"  - Dry Run: {dry_run}")
+        logger.info("="*80)
+        
         if dry_run:
-            logger.warning("[DRY RUN] 仅预览，不会实际执行")
+            logger.warning("⚠️ [DRY RUN] 仅预览，不会实际执行")
         
         for i, v in enumerate(violations, 1):
             object_key = v['object_key']
             bucket = v['bucket_name']
             
             try:
+                logger.debug(f"\n[{i}/{len(violations)}] 处理: {object_key}")
+                
                 # 检查当前状态
+                logger.debug("  步骤1: 检查MinIO对象当前状态...")
                 acl_info = self.minio.get_object_acl(bucket, object_key)
+                logger.debug(f"    - is_blocked: {acl_info.get('is_blocked')}")
+                logger.debug(f"    - status: {acl_info.get('status')}")
+                
                 if acl_info.get('is_blocked'):
-                    logger.debug(f"跳过已标记的文件: {object_key}")
+                    logger.debug(f"  ✓ 已标记，跳过")
                     stats['skipped'] += 1
                     continue
                 
                 if not dry_run:
                     # 设置对象为blocked状态
+                    logger.debug("  步骤2: 设置MinIO对象标签...")
                     self.minio.set_object_acl(bucket, object_key, 'private')
+                    logger.debug(f"    ✓ MinIO标签设置成功")
                     
                     # 更新数据库记录
+                    logger.debug("  步骤3: 更新数据库记录...")
                     self.db.execute_query(
                         "UPDATE image_scan_records SET blocked = 1, updated_at = NOW() WHERE id = %s",
                         (v['id'],)
                     )
                     self.db.connection.commit()
+                    logger.debug(f"    ✓ 数据库更新成功")
                 
                 stats['success'] += 1
                 logger.info(f"[{i}/{len(violations)}] ✓ {object_key} -> BLOCKED")
+                logger.debug(f"  - 违规类型: {v.get('violation_type')}")
+                logger.debug(f"  - 置信度: {v.get('confidence')}")
                 
             except Exception as e:
                 stats['failed'] += 1
-                logger.error(f"[{i}/{len(violations)}] ✗ {object_key} - {str(e)}")
+                logger.error(f"[{i}/{len(violations)}] ✗ {object_key} - 操作失败")
+                logger.error(f"  - 错误类型: {type(e).__name__}")
+                logger.error(f"  - 错误信息: {str(e)}")
+                logger.exception("  - 详细堆栈:")
         
         return stats
     

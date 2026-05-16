@@ -248,6 +248,36 @@ A: 扫描过程中会实时显示：
 跳过: 5, 错误: 0, 节约API: 25次
 ```
 
+---
+
+## 📝 日志系统
+
+程序采用**双日志文件**设计，方便调试和问题排查：
+
+### 日志文件位置
+
+- **运行日志**: `logs/scan.log` - 记录完整运行流程（DEBUG级别）
+- **错误日志**: `logs/error.log` - 只记录错误信息（ERROR级别）
+- **违规日志**: `logs/violations.log` - 专门记录违规图片（WARNING级别）
+
+### 常用命令
+
+```bash
+# 实时查看运行日志
+tail -f logs/scan.log
+
+# 查看最近的错误
+tail -50 logs/error.log
+
+# 查看所有违规记录
+cat logs/violations.log
+
+# 搜索特定图片的处理日志
+grep "image_name.jpg" logs/scan.log
+```
+
+详细使用方法请参考：[docs/LOG_GUIDE.md](docs/LOG_GUIDE.md) ⭐
+
 更多问题请查看 [docs/USAGE.md](docs/USAGE.md)
 
 ## 📄 许可证

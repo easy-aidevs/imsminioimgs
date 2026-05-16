@@ -7,15 +7,18 @@ import os
 import sys
 from datetime import datetime
 from typing import Dict, Optional
-from loguru import logger
-from tqdm import tqdm
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 # 导入自定义模块
+from logger_config import setup_logger
 from minio_client import MinIOClient
 from image_feature import ImageFeatureExtractor
 from tencent_ims import TencentIMSScanner
 from database import ImageDatabase
+
+# 初始化日志系统
+logger = setup_logger(log_dir="logs")
 
 
 class ImageSecurityScanner:
@@ -87,13 +90,20 @@ class ImageSecurityScanner:
         if not bucket:
             raise ValueError("必须指定bucket_name")
         
-        logger.info(f"开始扫描存储桶: {bucket}, 前缀: {prefix}")
-        logger.info(f"强制重扫: {force_rescan}, 数量限制: {limit}")
+        logger.info("="*80)
+        logger.info("开始扫描存储桶")
+        logger.info(f"  - 存储桶: {bucket}")
+        logger.info(f"  - 前缀: {prefix or '(无)'}")
+        logger.info(f"  - 强制重扫: {force_rescan}")
+        logger.info(f"  - 数量限制: {limit or '(无)'}")
+        logger.info("="*80)
         
         start_time = datetime.now()
+        logger.debug(f"扫描开始时间: {start_time}")
         
         try:
             # 获取所有图片对象
+            logger.debug("正在从 MinIO 获取图片列表...")
             objects = list(self.minio_client.list_objects(
                 bucket_name=bucket,
                 prefix=prefix,
@@ -101,7 +111,8 @@ class ImageSecurityScanner:
             ))
             
             total_count = len(objects)
-            logger.info(f"共找到 {total_count} 个图片文件")
+            logger.info(f"✓ 共找到 {total_count} 个图片文件")
+            logger.debug(f"图片列表获取完成，耗时: {datetime.now() - start_time}")
             
             if limit:
                 objects = objects[:limit]
@@ -154,19 +165,36 @@ class ImageSecurityScanner:
             force_rescan: 是否强制重扫
         """
         try:
+            logger.debug(f"\n--- 开始处理图片 [{self.stats['total']+1}] ---")
+            logger.debug(f"  - Bucket: {bucket_name}")
+            logger.debug(f"  - Object: {object_name}")
+            
             # 1. 计算图片key
+            logger.debug("步骤1: 从 MinIO 下载图片数据...")
             image_data = self.minio_client.get_object_data(bucket_name, object_name)
+            logger.debug(f"  - 图片大小: {len(image_data)} bytes")
+            
+            logger.debug("步骤2: 计算图片唯一标识Key...")
             key = self.feature_extractor.calculate_key(image_data)
+            logger.debug(f"  - Key: {key[:50]}...")
             
             # 2. 检查数据库中是否已存在（但还是要记录当前路径）
+            logger.debug("步骤3: 查询数据库是否存在相同Key...")
             existing_record = self.db.find_by_key(key)
             
             if existing_record and not force_rescan:
                 # 已扫描过，但仍然需要记录当前路径到数据库
-                logger.debug(f"图片已扫描过（Key: {key[:30]}...），但仍记录当前路径")
+                logger.debug(f"✓ 图片已扫描过（Key重复），跳过IMS检测")
+                logger.debug(f"  - 原始记录ID: {existing_record.get('id')}")
+                logger.debug(f"  - 原始路径: {existing_record.get('object_key')}")
+                logger.debug(f"  - 是否违规: {existing_record.get('is_violation')}")
                 
                 # 提取当前图片的特征（即使跳过IMS，也要计算特征码）
+                logger.debug("步骤4: 计算当前图片特征码...")
                 features = self.feature_extractor.extract_features(image_data)
+                logger.debug(f"  - pHash: {features['phash']}")
+                logger.debug(f"  - dHash: {features['dhash']}")
+                logger.debug(f"  - aHash: {features['ahash']}")
                 
                 # 插入当前路径的记录（保留所有路径）
                 record = {
@@ -206,17 +234,32 @@ class ImageSecurityScanner:
                 # 如果已经是违规图片，记录日志
                 if existing_record.get('is_violation'):
                     logger.warning(
-                        f"发现违规图片（已扫描过）: {object_name} | "
+                        f"🚨 发现违规图片（Key重复）: {object_name} | "
                         f"类型: {existing_record.get('violation_type')} | "
                         f"置信度: {existing_record.get('confidence')}"
                     )
+                    self.stats['violations'] += 1
+                else:
+                    logger.debug(f"✓ 正常图片（Key重复），已记录路径")
                 
+                logger.debug("步骤5: 插入数据库记录...")
+                # 保存到数据库（插入新记录，保留所有路径）
+                self.db.insert_record(record)
+                logger.debug(f"✓ 数据库记录插入成功, ID: {record.get('id', 'N/A')}")
+                
+                self.stats['skipped'] += 1
+                logger.debug(f"--- 处理完成 [跳过IMS] ---\n")
                 return  # 跳过IMS检测，但已记录路径
             
             # 3. 提取图片特征
+            logger.debug("步骤3: 提取图片特征...")
             features = self.feature_extractor.extract_features(image_data)
+            logger.debug(f"  - pHash: {features['phash']}")
+            logger.debug(f"  - dHash: {features['dhash']}")
+            logger.debug(f"  - aHash: {features['ahash']}")
             
             # 4. 快速检查：基于特征哈希查找相似违规图片（节约API调用）
+            logger.debug("步骤4: 查询数据库中相似的违规图片...")
             similar_violations = self.db.find_similar_violations(features['phash'], max_distance=5)
             
             if similar_violations:
@@ -285,10 +328,20 @@ class ImageSecurityScanner:
                     logger.info(f"⚠️ 中度相似（距离={distance}），仍调用IMS确认以保证准确性")
             
             # 5. 调用腾讯云IMS进行扫描（没有找到高度相似违规图片或距离>3）
-            logger.debug(f"正在扫描: {object_name}")
+            logger.info(f"📡 步骤5: 调用腾讯云IMS API检测...")
+            logger.debug(f"  - Object: {object_name}")
+            ims_start = datetime.now()
             ims_result = self.ims_scanner.scan_image(image_data)
+            ims_duration = (datetime.now() - ims_start).total_seconds()
+            logger.debug(f"  - IMS响应时间: {ims_duration:.2f}秒")
+            logger.debug(f"  - 是否违规: {ims_result['is_violation']}")
+            if ims_result['is_violation']:
+                logger.debug(f"  - 违规类型: {ims_result.get('violation_type')}")
+                logger.debug(f"  - 置信度: {ims_result.get('confidence')}")
+                logger.debug(f"  - RequestID: {ims_result.get('request_id')}")
             
             # 6. 构建记录
+            logger.debug("步骤6: 构建数据库记录...")
             record = {
                 'key': key,
                 'feature_hash': features['phash'],
@@ -314,12 +367,19 @@ class ImageSecurityScanner:
             }
             
             # 7. 保存到数据库
+            logger.debug("步骤7: 保存记录到数据库...")
             self.db.upsert_record(record)
+            logger.debug(f"✓ 数据库记录保存成功")
             
             # 8. 更新统计
             self.stats['scanned'] += 1
             if ims_result['is_violation']:
                 self.stats['violations'] += 1
+                logger.warning(
+                    f"🚨 发现违规图片: {object_name} | "
+                    f"类型: {ims_result.get('violation_type')} | "
+                    f"置信度: {ims_result.get('confidence')}"
+                )
                 
                 # 特别关注棋牌类违规
                 if ims_result.get('violation_type') == 'gambling':
@@ -337,7 +397,10 @@ class ImageSecurityScanner:
             
         except Exception as e:
             self.stats['errors'] += 1
-            logger.error(f"处理图片失败 [{bucket_name}/{object_name}]: {e}")
+            logger.error(f"❌ 处理图片失败 [{bucket_name}/{object_name}]")
+            logger.error(f"  - 错误类型: {type(e).__name__}")
+            logger.error(f"  - 错误信息: {str(e)}")
+            logger.exception("详细堆栈信息:")  # 记录完整堆栈
             
             # 保存错误记录
             try:
