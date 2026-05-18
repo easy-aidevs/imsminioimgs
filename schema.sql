@@ -45,10 +45,10 @@ CREATE TABLE IF NOT EXISTS image_scan_records (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间',
     
     -- 索引
-    INDEX idx_key (`key`),  -- 用于查找相同图片的所有路径
+    UNIQUE KEY uk_bucket_object (bucket_name, object_key(255)),  -- ✅ 唯一约束：同一MinIO路径只有一条记录
+    INDEX idx_key (`key`),  -- 用于查找相同图片的不同路径
     INDEX idx_feature_hash (feature_hash),
     INDEX idx_feature_dhash (feature_hash_dhash),
-    INDEX idx_bucket_object (bucket_name, object_key(255)),
     INDEX idx_is_violation (is_violation),
     INDEX idx_blocked (blocked),  -- 用于查询被block的文件
     INDEX idx_violation_type (violation_type),
@@ -57,36 +57,3 @@ CREATE TABLE IF NOT EXISTS image_scan_records (
     INDEX idx_last_scanned_at (last_scanned_at)
     
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='图片内容安全扫描记录表';
-
--- 相似图片关联表（可选，用于快速查找相似图片）
-CREATE TABLE IF NOT EXISTS similar_images (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
-    source_image_key VARCHAR(128) NOT NULL COMMENT '源图片key',
-    similar_image_key VARCHAR(128) NOT NULL COMMENT '相似图片key',
-    similarity_score DECIMAL(5,4) NOT NULL COMMENT '相似度分数: 0.0000-1.0000',
-    hash_distance INT NOT NULL COMMENT '哈希距离',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-    
-    INDEX idx_source_image (source_image_key),
-    INDEX idx_similar_image (similar_image_key),
-    UNIQUE KEY uk_source_similar (source_image_key, similar_image_key)
-    
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='相似图片关联表';
-
--- 扫描统计汇总表
-CREATE TABLE IF NOT EXISTS scan_statistics (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
-    stat_date DATE NOT NULL COMMENT '统计日期',
-    bucket_name VARCHAR(255) DEFAULT NULL COMMENT '存储桶名称(NULL表示全部)',
-    total_scanned INT DEFAULT 0 COMMENT '总扫描数',
-    total_violations INT DEFAULT 0 COMMENT '违规总数',
-    violation_by_type JSON DEFAULT NULL COMMENT '各违规类型统计: {"gambling": 10, "porn": 5, ...}',
-    avg_confidence DECIMAL(5,4) DEFAULT NULL COMMENT '平均置信度',
-    scan_duration_seconds INT DEFAULT NULL COMMENT '扫描耗时(秒)',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-    
-    UNIQUE KEY uk_date_bucket (stat_date, bucket_name),
-    INDEX idx_stat_date (stat_date)
-    
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='扫描统计汇总表';
