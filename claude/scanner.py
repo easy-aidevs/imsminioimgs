@@ -3,6 +3,7 @@
 入口：直接运行本文件。配置通过 .env 读取。
 """
 
+import hashlib
 import os
 import sys
 from datetime import datetime
@@ -80,6 +81,7 @@ class ImageSecurityScanner:
         logger.info(f"待处理 {len(objects)} 个图片")
 
         start = datetime.now()
+        total_objects = len(objects)
         for object_name, _ in tqdm(objects, desc="扫描", unit="img"):
             self.stats['total'] += 1
             try:
@@ -89,7 +91,8 @@ class ImageSecurityScanner:
                 logger.error(f"处理失败 [{object_name}]: {e}")
                 self._record_error(bucket, object_name, e)
 
-            if self.stats['total'] % 100 == 0:
+            # 每 100 张打一次进度统计；最后一张留给循环外的最终统计打印。
+            if self.stats['total'] % 100 == 0 and self.stats['total'] != total_objects:
                 self._log_stats()
 
         duration = (datetime.now() - start).total_seconds()
@@ -215,19 +218,22 @@ class ImageSecurityScanner:
         self.db.upsert_record(record)
 
     def _record_error(self, bucket: str, object_name: str, err: Exception):
+        # key 字段长 VARCHAR(128)，object_name 可能很长，用 md5 保证长度有界。
+        path_hash = hashlib.md5(f"{bucket}/{object_name}".encode()).hexdigest()
+        error_msg = str(err)[:60000]  # error_message 是 TEXT (64KB)，做个上限保险
         try:
             self.db.upsert_record({
-                'key': f"error-{bucket}-{object_name}",
+                'key': f"error-{path_hash}",
                 'feature_hash': '',
                 'bucket_name': bucket,
                 'object_key': object_name,
                 'file_size': 0,
                 'scan_status': 'failed',
-                'error_message': str(err),
+                'error_message': error_msg,
                 'last_scanned_at': datetime.now(),
             })
-        except Exception:
-            pass
+        except Exception as write_err:
+            logger.error(f"无法写入错误记录 [{object_name}]: {write_err}")
 
     # ------------------------------------------------------------------ 统计
 

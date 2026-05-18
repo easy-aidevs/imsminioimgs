@@ -4,10 +4,11 @@
 """
 
 import hashlib
+import io
+from typing import Dict
+
 from PIL import Image
 import imagehash
-import io
-from typing import Tuple, Dict
 from loguru import logger
 
 

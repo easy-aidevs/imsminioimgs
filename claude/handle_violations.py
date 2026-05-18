@@ -12,7 +12,6 @@
 
 import argparse
 import os
-import sys
 from typing import Dict, List
 
 from dotenv import load_dotenv

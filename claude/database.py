@@ -90,7 +90,9 @@ class ImageDatabase:
                    violation_type, violation_label, violation_description,
                    confidence, suggestion, is_violation
             FROM image_scan_records
-            WHERE scan_status = 'completed' AND feature_hash IS NOT NULL
+            WHERE scan_status = 'completed'
+              AND feature_hash IS NOT NULL
+              AND feature_hash != ''
             ORDER BY created_at DESC
             LIMIT %s
             """,

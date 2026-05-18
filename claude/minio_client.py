@@ -1,6 +1,5 @@
 """MinIO 客户端：图片列举、下载、隔离桶迁移、违规标签。"""
 
-from io import BytesIO
 from typing import Generator, Tuple
 
 from minio import Minio

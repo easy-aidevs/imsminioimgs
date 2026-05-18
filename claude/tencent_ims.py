@@ -166,25 +166,26 @@ class TencentIMSScanner:
                     sub_labels = []
                     descriptions = []
                     max_confidence = 0.0
-                    
+
                     for sub_label in label_info.SubLabels:
                         if hasattr(sub_label, 'Label'):
                             sub_labels.append(sub_label.Label)
-                        
+
                         if hasattr(sub_label, 'Description'):
                             descriptions.append(sub_label.Description)
-                        
+
                         # 获取最高置信度
                         if hasattr(sub_label, 'Confidence'):
                             max_confidence = max(max_confidence, sub_label.Confidence)
-                    
+
                     if sub_labels:
                         result['violation_label'] = ','.join(sub_labels)
-                    
+
                     if descriptions:
                         result['violation_description'] = '; '.join(descriptions)
-                    
-                    result['confidence'] = max_confidence
+
+                    # 腾讯云 IMS 的 Confidence 取值 0-100，数据库列是 DECIMAL(5,4) (0-1)，归一化。
+                    result['confidence'] = max_confidence / 100.0 if max_confidence > 1.0 else max_confidence
             
             # 保存原始结果
             result['raw_result'] = json.loads(resp.to_json_string())
