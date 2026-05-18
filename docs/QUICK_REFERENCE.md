@@ -1,153 +1,255 @@
-# 图片内容安全扫描系统 - 快速参考卡
+# 图片扫描系统快速参考
 
-## 🚀 5分钟快速开始
+## 🚀 快速开始
+
+### 1. 环境配置
 
 ```bash
-# 1. 安装依赖
-pip install -r requirements.txt
-
-# 2. 配置环境
+# 复制示例配置
 cp .env.example .env
-vim .env  # 填写您的配置
 
-# 3. 初始化数据库
-mysql -u root -p < schema.sql
-
-# 4. 运行扫描
-python scanner.py
+# 编辑 .env 文件，填写必要配置
+vim .env
 ```
 
-## 📋 必要配置项
-
-在 `.env` 文件中必须设置：
-
-```ini
+**必填配置**:
+```bash
 MINIO_ENDPOINT=localhost:9000
-MINIO_ACCESS_KEY=你的密钥
-MINIO_SECRET_KEY=你的密钥
-MINIO_BUCKET_NAME=要扫描的桶名
+MINIO_ACCESS_KEY=your_key
+MINIO_SECRET_KEY=your_secret
+MINIO_BUCKET_NAME=images
 
-TENCENT_SECRET_ID=你的ID
-TENCENT_SECRET_KEY=你的密钥
+MYSQL_HOST=localhost
+MYSQL_PASSWORD=your_password
+MYSQL_DATABASE=image_security
 
-MYSQL_PASSWORD=你的密码
+TENCENT_SECRET_ID=your_id
+TENCENT_SECRET_KEY=your_secret
 ```
-
-## 🎯 常用命令
-
-```bash
-# 验证系统
-./verify.sh
-
-# 交互式扫描（推荐）
-./run.sh
-
-# 直接扫描
-python scanner.py
-
-# 扫描指定前缀
-SCAN_PREFIX=uploads/2024/ python scanner.py
-
-# 限制数量（测试用）
-SCAN_LIMIT=100 python scanner.py
-
-# 强制重扫
-FORCE_RESCAN=true python scanner.py
-```
-
-## 📊 查看结果
-
-### 控制台
-实时显示扫描进度和违规图片
-
-### 违规报告
-```bash
-cat violations.txt
-```
-
-### 数据库查询
-```sql
--- 所有违规图片
-SELECT * FROM image_scan_records WHERE is_violation = 1;
-
--- 棋牌类违规
-SELECT * FROM image_scan_records WHERE violation_type = 'gambling';
-
--- 统计信息
-SELECT violation_type, COUNT(*) FROM image_scan_records 
-WHERE is_violation = 1 GROUP BY violation_type;
-```
-
-## 🔍 违规类型
-
-| 类型 | 说明 | 重点 |
-|------|------|------|
-| gambling | 赌博/棋牌 | ⭐⭐⭐ |
-| porn | 色情 | ⭐⭐⭐ |
-| violence | 暴力 | ⭐⭐ |
-| politics | 政治敏感 | ⭐⭐ |
-| terrorism | 恐怖主义 | ⭐⭐⭐ |
-
-## ⚙️ 环境变量
-
-| 变量 | 说明 | 示例 |
-|------|------|------|
-| SCAN_BUCKET_NAME | 存储桶名称 | my-images |
-| SCAN_PREFIX | 对象前缀 | uploads/ |
-| SCAN_LIMIT | 限制数量 | 1000 |
-| FORCE_RESCAN | 强制重扫 | true/false |
-
-## 🐛 故障排查
-
-### 问题1: 连接MinIO失败
-- 检查 `MINIO_ENDPOINT` 是否正确
-- 验证 `ACCESS_KEY` 和 `SECRET_KEY`
-- 确认网络可达
-
-### 问题2: 数据库连接失败
-- 确认MySQL服务运行中
-- 检查用户名密码
-- 确认数据库已创建
-
-### 问题3: IMS API调用失败
-- 验证腾讯云密钥
-- 检查账户余额
-- 确认API配额充足
-
-### 查看详细日志
-```bash
-tail -f scanner.log
-```
-
-## 📁 文件说明
-
-| 文件 | 用途 |
-|------|------|
-| scanner.py | 主程序 |
-| minio_client.py | MinIO操作 |
-| image_feature.py | 特征提取 |
-| tencent_ims.py | IMS检测 |
-| database.py | 数据库操作 |
-| schema.sql | 表结构 |
-| .env | 配置文件 |
-| run.sh | 启动脚本 |
-| violations.txt | 违规报告 |
-| scanner.log | 详细日志 |
-
-## 💡 提示
-
-1. **首次扫描**: 建议先用 `SCAN_LIMIT=100` 测试
-2. **增量扫描**: 系统自动跳过已扫描图片
-3. **相似检测**: 汉明距离≤5认为相似
-4. **中断续扫**: 直接重新运行即可继续
-5. **定期备份**: 备份MySQL数据库
-
-## 📞 获取帮助
-
-- 详细文档: 查看 `USAGE.md`
-- 项目结构: 查看 `PROJECT_STRUCTURE.md`
-- 交付说明: 查看 `DELIVERY.md`
-- 日志文件: `scanner.log`
 
 ---
-**快速参考 | 版本 1.0 | 2024**
+
+### 2. 初始化数据库
+
+```bash
+mysql -u root -p < schema.sql
+```
+
+---
+
+### 3. 运行扫描器
+
+```bash
+# 方式1: 直接运行
+python3 scanner.py
+
+# 方式2: Docker 运行
+docker-compose up scanner
+
+# 方式3: 限制扫描数量（测试用）
+SCAN_LIMIT=100 python3 scanner.py
+```
+
+---
+
+## 📊 核心逻辑速查
+
+### 三层去重机制
+
+```
+第1层: 路径去重 (bucket + object_key)
+  → 同一路径完全跳过 ✅
+
+第2层: 内容去重 (Key = md5 + size)
+  → 相同内容不同路径，复用结果，插入新记录 ✅
+
+第3层: 相似去重 (Feature Hash)
+  → 高度相似违规图片，直接标记，跳过 API ✅
+```
+
+---
+
+### 扫描流程（9步）
+
+```
+1. 下载图片 (MinIO)
+2. 计算 Key (md5 + size)
+3. 检查路径重复 → 是则跳过
+4. 提取特征 (pHash/dHash/aHash)
+5. 检查内容重复 → 是则复用结果
+6. 查询相似违规 → 是且距离≤3则直接标记
+7. 调用 IMS API
+8. 保存记录 (upsert)
+9. 更新缓存 (如果违规)
+```
+
+---
+
+## ⚙️ 性能优化配置
+
+### 根据数据规模选择策略
+
+| 违规图片数 | CACHE_STRATEGY | CACHE_MAX_SIZE | 内存占用 |
+|-----------|---------------|----------------|---------|
+| < 10万 | full | - | ~200MB |
+| 10万-100万 | lru | 10000 | ~20MB |
+| > 100万 | lru | 5000 | ~10MB |
+| > 1000万 | none | - | 0MB |
+
+### 配置示例
+
+```bash
+# 小规模（追求命中率）
+CACHE_ENABLED=true
+CACHE_STRATEGY=full
+
+# 中规模（平衡性能和内存）⭐ 推荐
+CACHE_ENABLED=true
+CACHE_STRATEGY=lru
+CACHE_MAX_SIZE=10000
+
+# 大规模（优先稳定性）
+CACHE_ENABLED=true
+CACHE_STRATEGY=lru
+CACHE_MAX_SIZE=5000
+
+# 超大规模（禁用缓存）
+CACHE_ENABLED=false
+```
+
+---
+
+## 🔍 监控与调试
+
+### 查看缓存统计
+
+扫描结束时日志输出：
+```
+📦 特征缓存统计 - 缓存大小: 8542个特征, 命中率: 87.3% (8734/10000), 数据库查询: 1266次
+```
+
+**调优指南**:
+- 命中率 < 50% → 增大 `CACHE_MAX_SIZE`
+- 命中率 > 90% → 可适当减小 `CACHE_MAX_SIZE`
+- 内存紧张 → 减小 `CACHE_MAX_SIZE` 或改用 `none`
+
+---
+
+### 查看日志文件
+
+```bash
+# 实时日志
+tail -f logs/scan.log
+
+# 错误日志
+tail -f logs/error.log
+
+# 违规图片日志
+tail -f logs/violations.log
+```
+
+---
+
+## 🛠️ 常见问题速查
+
+### Q1: 重复扫描同一文件？
+**解决**: 检查数据库唯一约束
+```sql
+SHOW INDEX FROM image_scan_records;
+-- 应该看到 uk_bucket_object
+```
+
+---
+
+### Q2: 内存占用过高？
+**解决**: 减小缓存或禁用
+```bash
+CACHE_MAX_SIZE=5000        # 减小缓存
+# 或
+CACHE_STRATEGY=none        # 禁用缓存
+```
+
+---
+
+### Q3: 初始化太慢？
+**解决**: 使用 LRU 策略
+```bash
+CACHE_STRATEGY=lru         # 只加载最近 N 条
+CACHE_MAX_SIZE=10000       # 限制数量
+```
+
+---
+
+### Q4: 如何强制重新扫描？
+**解决**: 设置环境变量
+```bash
+FORCE_RESCAN=true python3 scanner.py
+```
+
+---
+
+### Q5: 如何限制扫描数量？
+**解决**: 设置 SCAN_LIMIT
+```bash
+SCAN_LIMIT=100 python3 scanner.py  # 只扫描 100 张
+```
+
+---
+
+## 📈 关键指标
+
+### 统计信息示例
+
+```
+统计信息 - 总数: 10000, 已扫描: 8500, 违规: 450, 跳过: 1000, 错误: 50, 节约API: 1200次
+📦 特征缓存统计 - 缓存大小: 8542个特征, 命中率: 87.3% (8734/10000), 数据库查询: 1266次
+```
+
+**关键指标**:
+- **总数**: 处理的图片总数
+- **已扫描**: 实际调用 API 的数量
+- **违规**: 发现的违规图片数
+- **跳过**: 通过去重跳过的数量
+- **节约API**: 通过去重和相似检测节约的 API 调用次数 💰
+
+---
+
+## 🔧 高级用法
+
+### 指定存储桶和前缀
+
+```bash
+# 扫描特定存储桶
+MINIO_BUCKET_NAME=my-bucket python3 scanner.py
+
+# 扫描特定前缀
+SCAN_PREFIX=uploads/2024/ python3 scanner.py
+```
+
+---
+
+### 批量处理违规图片
+
+```bash
+# 生成违规报告
+python3 handle_violations.py --report
+
+# 批量删除违规图片
+python3 handle_violations.py --delete --confirm
+
+# 移动违规图片到隔离桶
+python3 handle_violations.py --move --target-bucket quarantined
+```
+
+---
+
+## 📚 相关文档
+
+- [完整逻辑说明](SCANNING_LOGIC.md) - 详细的扫描流程和去重机制
+- [性能优化方案](PERFORMANCE_OPTIMIZATION.md) - 大规模场景优化
+- [去重逻辑详解](DEDUPLICATION_LOGIC.md) - Key 的作用和去重原理
+- [数据库优化](DATABASE_OPTIMIZATION.md) - 表结构设计和索引优化
+
+---
+
+**最后更新**: 2026-05-16

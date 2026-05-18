@@ -2,6 +2,14 @@
 
 基于腾讯云IMS和感知哈希算法的图片内容安全检测系统，专门用于识别违规图片（特别是棋牌类），通过智能特征匹配大幅节约API调用费用。
 
+## 📚 文档导航
+
+- **[快速参考](docs/QUICK_REFERENCE.md)** - 快速开始、配置、常见问题
+- **[完整逻辑说明](docs/SCANNING_LOGIC.md)** - 详细的扫描流程、去重机制、性能分析
+- **[性能优化方案](docs/PERFORMANCE_OPTIMIZATION.md)** - 大规模场景优化建议
+- **[数据库优化](docs/DATABASE_OPTIMIZATION.md)** - 表结构设计和索引优化
+- **[违规图片处理](docs/VIOLATION_HANDLING_PERMISSIONS.md)** - 基于MinIO标签的权限控制
+
 ## ✨ 核心特性
 
 - 🎯 **智能去重**: 基于MD5的精确去重，避免重复扫描

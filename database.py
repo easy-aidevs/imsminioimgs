@@ -95,16 +95,35 @@ class ImageDatabase:
     
     def find_by_key(self, key: str) -> Optional[Dict]:
         """
-        根据key查找记录（返回第一条，用于获取特征信息）
+        根据key查找记录（返回第一条，用于获取扫描结果）
         
         Args:
-            key: 图片唯一标识
+            key: 图片唯一标识（内容哈希）
             
         Returns:
             Dict or None: 记录字典，不存在则返回None
         """
         query = "SELECT * FROM image_scan_records WHERE `key` = %s LIMIT 1"
         results = self.execute_query(query, (key,), fetch=True)
+        return results[0] if results else None
+    
+    def find_by_bucket_object(self, bucket_name: str, object_key: str) -> Optional[Dict]:
+        """
+        根据MinIO路径查找记录（用于去重）
+        
+        Args:
+            bucket_name: 存储桶名称
+            object_key: 对象路径
+            
+        Returns:
+            Dict or None: 记录字典，不存在则返回None
+        """
+        query = """
+            SELECT * FROM image_scan_records 
+            WHERE bucket_name = %s AND object_key = %s 
+            LIMIT 1
+        """
+        results = self.execute_query(query, (bucket_name, object_key), fetch=True)
         return results[0] if results else None
     
     def find_all_by_key(self, key: str) -> List[Dict]:
@@ -157,7 +176,7 @@ class ImageDatabase:
         # 先获取所有违规记录的哈希值
         query = """
             SELECT `key`, object_key, bucket_name, feature_hash, feature_hash_dhash, 
-                   feature_hash_ahash, violation_type, violation_label, confidence
+                   feature_hash_ahash, violation_type, violation_label, confidence, is_violation
             FROM image_scan_records 
             WHERE is_violation = 1 
               AND scan_status = 'completed'
@@ -180,35 +199,53 @@ class ImageDatabase:
                     violation['hash_distance'] = distance
                     violation['match_type'] = 'phash'
                     similar_violations.append(violation)
-                    continue
-            
-            # 计算与dHash的距离
-            if violation.get('feature_hash_dhash'):
-                distance = ImageFeatureExtractor.calculate_hash_distance(
-                    feature_hash,
-                    violation['feature_hash_dhash']
-                )
-                if 0 <= distance <= max_distance:
-                    violation['hash_distance'] = distance
-                    violation['match_type'] = 'dhash'
-                    similar_violations.append(violation)
-                    continue
-            
-            # 计算与aHash的距离
-            if violation.get('feature_hash_ahash'):
-                distance = ImageFeatureExtractor.calculate_hash_distance(
-                    feature_hash,
-                    violation['feature_hash_ahash']
-                )
-                if 0 <= distance <= max_distance:
-                    violation['hash_distance'] = distance
-                    violation['match_type'] = 'ahash'
-                    similar_violations.append(violation)
         
-        # 按距离排序（距离越小越相似）
+        # 按距离排序
         similar_violations.sort(key=lambda x: x['hash_distance'])
-        
         return similar_violations[:10]  # 返回最相似的10个
+    
+    def find_similar_scanned(self, feature_hash: str, max_distance: int = 5) -> List[Dict]:
+        """
+        查找相似的已扫描图片（包括违规和正常）
+        通过计算汉明距离来找到高度相似的已扫描图片，复用其IMS检测结果
+        
+        Args:
+            feature_hash: 当前图片的特征哈希
+            max_distance: 最大汉明距离阈值（默认5）
+            
+        Returns:
+            List[Dict]: 相似已扫描图片列表，包含距离信息
+        """
+        # 获取所有已扫描完成的记录
+        query = """
+            SELECT `key`, object_key, bucket_name, feature_hash, feature_hash_dhash, 
+                   feature_hash_ahash, violation_type, violation_label, confidence, 
+                   is_violation, suggestion
+            FROM image_scan_records 
+            WHERE scan_status = 'completed'
+              AND feature_hash IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 1000
+        """
+        scanned_images = self.execute_query(query, fetch=True)
+        
+        # 在Python中计算汉明距离并过滤
+        similar_images = []
+        for img in scanned_images:
+            # 计算与pHash的距离
+            if img.get('feature_hash'):
+                distance = ImageFeatureExtractor.calculate_hash_distance(
+                    feature_hash, 
+                    img['feature_hash']
+                )
+                if 0 <= distance <= max_distance:
+                    img['hash_distance'] = distance
+                    img['match_type'] = 'phash'
+                    similar_images.append(img)
+        
+        # 按距离排序
+        similar_images.sort(key=lambda x: x['hash_distance'])
+        return similar_images[:10]  # 返回最相似的10个
     
     def insert_record(self, record: Dict) -> int:
         """
@@ -226,7 +263,7 @@ class ImageDatabase:
                 feature_hash_phash, bucket_name, object_key, file_size, 
                 content_type, is_violation, violation_type, violation_label,
                 violation_description, confidence, suggestion, ims_result,
-                ims_request_id, scan_status, error_message, last_scanned_at
+                ims_request_id, scan_status, error_message, first_seen_at, last_scanned_at
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s
@@ -253,7 +290,8 @@ class ImageDatabase:
             record.get('ims_request_id'),
             record.get('scan_status', 'completed'),
             record.get('error_message'),
-            record.get('last_scanned_at', datetime.now())
+            record.get('first_seen_at', datetime.now()),  # ✅ 首次发现时间
+            record.get('last_scanned_at', datetime.now())  # ✅ 最后扫描时间
         )
         
         record_id = self.execute_query(query, params)
@@ -262,7 +300,10 @@ class ImageDatabase:
     
     def update_record(self, key: str, updates: Dict) -> bool:
         """
-        更新扫描记录
+        ⚠️ 已废弃：请使用 upsert_record() 方法
+        
+        此方法按 key 更新，但数据库唯一约束是 (bucket_name, object_key)
+        可能导致更新错误的记录。建议使用 upsert_record() 代替。
         
         Args:
             key: 图片唯一标识
@@ -271,6 +312,8 @@ class ImageDatabase:
         Returns:
             bool: 是否更新成功
         """
+        logger.warning("⚠️ update_record() 已废弃，请使用 upsert_record()")
+        
         if not updates:
             return False
         
@@ -300,7 +343,8 @@ class ImageDatabase:
     
     def upsert_record(self, record: Dict) -> int:
         """
-        插入或更新记录（如果key已存在则更新）
+        插入或更新记录（基于 bucket_name + object_key 唯一约束）
+        使用 MySQL 的 INSERT ... ON DUPLICATE KEY UPDATE 语法
         
         Args:
             record: 记录字典
@@ -308,32 +352,65 @@ class ImageDatabase:
         Returns:
             int: 记录ID
         """
-        existing = self.find_by_key(record['key'])
+        query = """
+            INSERT INTO image_scan_records (
+                `key`, feature_hash, feature_hash_dhash, feature_hash_ahash,
+                feature_hash_phash, bucket_name, object_key, file_size,
+                content_type, is_violation, violation_type, violation_label,
+                violation_description, confidence, suggestion, ims_result,
+                ims_request_id, scan_status, error_message, first_seen_at, last_scanned_at
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s
+            )
+            ON DUPLICATE KEY UPDATE
+                `key` = VALUES(`key`),
+                feature_hash = VALUES(feature_hash),
+                feature_hash_dhash = VALUES(feature_hash_dhash),
+                feature_hash_ahash = VALUES(feature_hash_ahash),
+                feature_hash_phash = VALUES(feature_hash_phash),
+                is_violation = VALUES(is_violation),
+                violation_type = VALUES(violation_type),
+                violation_label = VALUES(violation_label),
+                violation_description = VALUES(violation_description),
+                confidence = VALUES(confidence),
+                suggestion = VALUES(suggestion),
+                ims_result = VALUES(ims_result),
+                ims_request_id = VALUES(ims_request_id),
+                scan_status = VALUES(scan_status),
+                error_message = VALUES(error_message),
+                first_seen_at = COALESCE(first_seen_at, VALUES(first_seen_at)),  -- ✅ 保持原值
+                last_scanned_at = NOW(),
+                updated_at = NOW()
+        """
         
-        if existing:
-            # 更新现有记录
-            updates = {
-                'feature_hash': record.get('feature_hash'),
-                'feature_hash_dhash': record.get('feature_hash_dhash'),
-                'feature_hash_ahash': record.get('feature_hash_ahash'),
-                'feature_hash_phash': record.get('feature_hash_phash'),
-                'is_violation': record.get('is_violation', 0),
-                'violation_type': record.get('violation_type'),
-                'violation_label': record.get('violation_label'),
-                'violation_description': record.get('violation_description'),
-                'confidence': record.get('confidence'),
-                'suggestion': record.get('suggestion'),
-                'ims_result': record.get('ims_result'),
-                'ims_request_id': record.get('ims_request_id'),
-                'scan_status': record.get('scan_status', 'completed'),
-                'error_message': record.get('error_message'),
-                'last_scanned_at': datetime.now()
-            }
-            self.update_record(record['key'], updates)
-            return existing['id']
-        else:
-            # 插入新记录
-            return self.insert_record(record)
+        params = (
+            record.get('key'),
+            record.get('feature_hash'),
+            record.get('feature_hash_dhash'),
+            record.get('feature_hash_ahash'),
+            record.get('feature_hash_phash'),
+            record.get('bucket_name'),
+            record.get('object_key'),
+            record.get('file_size'),
+            record.get('content_type'),
+            record.get('is_violation', 0),
+            record.get('violation_type'),
+            record.get('violation_label'),
+            record.get('violation_description'),
+            record.get('confidence'),
+            record.get('suggestion'),
+            json.dumps(record.get('ims_result')) if record.get('ims_result') else None,
+            record.get('ims_request_id'),
+            record.get('scan_status', 'completed'),
+            record.get('error_message'),
+            record.get('first_seen_at', datetime.now()),  # ✅ 首次发现时间
+            record.get('last_scanned_at', datetime.now())  # ✅ 最后扫描时间
+        )
+        
+        record_id = self.execute_query(query, params)
+        logger.debug(f"Upsert记录成功，ID: {record_id}")
+        return record_id
     
     def get_violation_images(self, limit: int = 100, offset: int = 0) -> List[Dict]:
         """
@@ -353,6 +430,64 @@ class ImageDatabase:
             LIMIT %s OFFSET %s
         """
         return self.execute_query(query, (limit, offset), fetch=True)
+    
+    def get_all_violations(self) -> List[Dict]:
+        """
+        获取所有违规图片（用于加载到缓存）
+        
+        Returns:
+            List[Dict]: 所有违规图片记录
+        """
+        query = """
+            SELECT * FROM image_scan_records 
+            WHERE is_violation = 1 AND feature_hash IS NOT NULL
+            ORDER BY created_at DESC
+        """
+        return self.execute_query(query, fetch=True)
+    
+    def get_all_scanned_images(self, limit: int = None) -> List[Dict]:
+        """
+        获取所有已扫描的图片（用于加载到缓存）
+        
+        Args:
+            limit: 限制数量（None表示不限制）
+            
+        Returns:
+            List[Dict]: 所有已扫描图片记录
+        """
+        if limit:
+            query = """
+                SELECT * FROM image_scan_records 
+                WHERE feature_hash IS NOT NULL AND scan_status = 'completed'
+                ORDER BY created_at DESC
+                LIMIT %s
+            """
+            return self.execute_query(query, (limit,), fetch=True)
+        else:
+            query = """
+                SELECT * FROM image_scan_records 
+                WHERE feature_hash IS NOT NULL AND scan_status = 'completed'
+                ORDER BY created_at DESC
+            """
+            return self.execute_query(query, fetch=True)
+    
+    def get_recent_violations(self, limit: int = 10000) -> List[Dict]:
+        """
+        获取最近的违规图片（用于LRU缓存）
+        
+        Args:
+            limit: 限制数量
+            
+        Returns:
+            List[Dict]: 最近的违规图片记录
+        """
+        query = """
+            SELECT * FROM image_scan_records 
+            WHERE is_violation = 1 AND feature_hash IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT %s
+        """
+        return self.execute_query(query, (limit,), fetch=True)
     
     def get_statistics(self) -> Dict:
         """
