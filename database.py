@@ -262,10 +262,10 @@ class ImageDatabase:
                 `key`, feature_hash, feature_hash_dhash, feature_hash_ahash, 
                 feature_hash_phash, bucket_name, object_key, file_size, 
                 content_type, is_violation, violation_type, violation_label,
-                violation_description, confidence, suggestion, ims_result,
+                violation_description, confidence, suggestion, blocked, ims_result,
                 ims_request_id, scan_status, error_message, first_seen_at, last_scanned_at
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s
             )
         """
@@ -286,6 +286,7 @@ class ImageDatabase:
             record.get('violation_description'),
             record.get('confidence'),
             record.get('suggestion'),
+            record.get('blocked', 0),  # ✅ 添加 blocked 字段
             json.dumps(record.get('ims_result')) if record.get('ims_result') else None,
             record.get('ims_request_id'),
             record.get('scan_status', 'completed'),
@@ -357,10 +358,10 @@ class ImageDatabase:
                 `key`, feature_hash, feature_hash_dhash, feature_hash_ahash,
                 feature_hash_phash, bucket_name, object_key, file_size,
                 content_type, is_violation, violation_type, violation_label,
-                violation_description, confidence, suggestion, ims_result,
+                violation_description, confidence, suggestion, blocked, ims_result,
                 ims_request_id, scan_status, error_message, first_seen_at, last_scanned_at
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s
             )
             ON DUPLICATE KEY UPDATE
@@ -375,6 +376,7 @@ class ImageDatabase:
                 violation_description = VALUES(violation_description),
                 confidence = VALUES(confidence),
                 suggestion = VALUES(suggestion),
+                blocked = VALUES(blocked),  -- ✅ 添加 blocked 字段更新
                 ims_result = VALUES(ims_result),
                 ims_request_id = VALUES(ims_request_id),
                 scan_status = VALUES(scan_status),
@@ -400,6 +402,7 @@ class ImageDatabase:
             record.get('violation_description'),
             record.get('confidence'),
             record.get('suggestion'),
+            record.get('blocked', 0),  # ✅ 添加 blocked 字段
             json.dumps(record.get('ims_result')) if record.get('ims_result') else None,
             record.get('ims_request_id'),
             record.get('scan_status', 'completed'),

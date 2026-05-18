@@ -80,7 +80,7 @@ class ViolationHandler:
             params.append(confidence_threshold)
         
         if exclude_blocked:
-            query += " AND (blocked IS NULL OR blocked = 0)"
+            query += " AND blocked = 0"  # ✅ blocked 字段有默认值 0，不会是 NULL
         
         query += " ORDER BY violation_type, confidence DESC"
         
@@ -123,13 +123,10 @@ class ViolationHandler:
             bucket = v['bucket_name']
             
             try:
-                logger.debug(f"\n[{i}/{len(violations)}] 处理: {object_key}")
+                logger.info(f"[{i}/{len(violations)}] 处理: {object_key}")
                 
                 # 检查当前状态
-                logger.debug("  步骤1: 检查MinIO对象当前状态...")
                 acl_info = self.minio.get_object_acl(bucket, object_key)
-                logger.debug(f"    - is_blocked: {acl_info.get('is_blocked')}")
-                logger.debug(f"    - status: {acl_info.get('status')}")
                 
                 if acl_info.get('is_blocked'):
                     logger.debug(f"  ✓ 已标记，跳过")
@@ -137,19 +134,26 @@ class ViolationHandler:
                     continue
                 
                 if not dry_run:
-                    # 设置对象为blocked状态
-                    logger.debug("  步骤2: 设置MinIO对象标签...")
-                    self.minio.set_object_acl(bucket, object_key, 'private')
-                    logger.debug(f"    ✓ MinIO标签设置成功")
-                    
-                    # 更新数据库记录
-                    logger.debug("  步骤3: 更新数据库记录...")
-                    self.db.execute_query(
-                        "UPDATE image_scan_records SET blocked = 1, updated_at = NOW() WHERE id = %s",
-                        (v['id'],)
-                    )
-                    self.db.connection.commit()
-                    logger.debug(f"    ✓ 数据库更新成功")
+                    # ✅ 事务保护：先设置 MinIO 标签，再更新数据库
+                    try:
+                        # 设置对象为blocked状态
+                        self.minio.set_object_acl(bucket, object_key, 'private')
+                        
+                        # 更新数据库记录
+                        self.db.execute_query(
+                            "UPDATE image_scan_records SET blocked = 1, updated_at = NOW() WHERE id = %s",
+                            (v['id'],)
+                        )
+                        self.db.connection.commit()
+                        
+                    except Exception as e:
+                        # ✅ 如果数据库更新失败，回滚 MinIO 操作
+                        logger.error(f"    ✗ 数据库更新失败，尝试回滚 MinIO 操作...")
+                        try:
+                            self.minio.set_object_acl(bucket, object_key, 'public')
+                        except:
+                            logger.error(f"    ✗ MinIO 回滚失败，需要手动处理")
+                        raise  # 重新抛出异常
                 
                 stats['success'] += 1
                 logger.info(f"[{i}/{len(violations)}] ✓ {object_key} -> BLOCKED")
@@ -187,16 +191,35 @@ class ViolationHandler:
             bucket = f['bucket_name']
             
             try:
+                # ✅ 恢复前检查 MinIO 状态
+                acl_info = self.minio.get_object_acl(bucket, object_key)
+                
+                if not acl_info.get('is_blocked'):
+                    logger.warning(f"[{i}/{len(blocked_files)}] ⚠️ {object_key} - 文件未被标记为blocked，跳过恢复")
+                    stats['skipped'] += 1
+                    continue
+                
                 if not dry_run:
-                    # 恢复对象为正常状态
-                    self.minio.set_object_acl(bucket, object_key, 'public')
-                    
-                    # 更新数据库记录
-                    self.db.execute_query(
-                        "UPDATE image_scan_records SET blocked = 0, is_violation = 0, updated_at = NOW() WHERE id = %s",
-                        (f['id'],)
-                    )
-                    self.db.connection.commit()
+                    # ✅ 事务保护：先恢复 MinIO 标签，再更新数据库
+                    try:
+                        # 恢复对象为正常状态
+                        self.minio.set_object_acl(bucket, object_key, 'public')
+                        
+                        # 更新数据库记录（只清除blocked标记，保留违规状态）
+                        self.db.execute_query(
+                            "UPDATE image_scan_records SET blocked = 0, updated_at = NOW() WHERE id = %s",
+                            (f['id'],)
+                        )
+                        self.db.connection.commit()
+                        
+                    except Exception as e:
+                        # ✅ 如果数据库更新失败，回滚 MinIO 操作
+                        logger.error(f"    ✗ 数据库更新失败，尝试回滚 MinIO 操作...")
+                        try:
+                            self.minio.set_object_acl(bucket, object_key, 'private')
+                        except:
+                            logger.error(f"    ✗ MinIO 回滚失败，需要手动处理")
+                        raise  # 重新抛出异常
                 
                 stats['success'] += 1
                 logger.info(f"[{i}/{len(blocked_files)}] ✓ {object_key} -> RESTORED")
@@ -229,16 +252,31 @@ class ViolationHandler:
             bucket = f['bucket_name']
             
             try:
+                # ✅ 删除前再次检查 MinIO 状态
+                acl_info = self.minio.get_object_acl(bucket, object_key)
+                
+                if not acl_info.get('is_blocked'):
+                    logger.warning(f"[{i}/{len(blocked_files)}] ⚠️ {object_key} - 文件未被标记为blocked，跳过删除")
+                    stats['failed'] += 1
+                    continue
+                
                 if not dry_run:
-                    # 从MinIO删除文件
-                    self.minio.remove_object(bucket, object_key)
-                    
-                    # 从数据库删除记录
-                    self.db.execute_query(
-                        "DELETE FROM image_scan_records WHERE id = %s",
-                        (f['id'],)
-                    )
-                    self.db.connection.commit()
+                    # ✅ 事务保护：先删除 MinIO 文件，再删除数据库记录
+                    try:
+                        # 从MinIO删除文件
+                        self.minio.remove_object(bucket, object_key)
+                        
+                        # 从数据库删除记录
+                        self.db.execute_query(
+                            "DELETE FROM image_scan_records WHERE id = %s",
+                            (f['id'],)
+                        )
+                        self.db.connection.commit()
+                        
+                    except Exception as e:
+                        # ✅ 如果数据库删除失败，无法回滚（文件已删除）
+                        logger.error(f"    ✗ 数据库删除失败，MinIO文件已删除，需要手动处理")
+                        raise  # 重新抛出异常
                 
                 stats['success'] += 1
                 logger.info(f"[{i}/{len(blocked_files)}] ✓ 已删除: {object_key}")
