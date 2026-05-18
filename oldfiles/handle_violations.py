@@ -47,7 +47,25 @@ class ViolationHandler:
             secure=os.getenv('MINIO_SECURE', 'false').lower() == 'true'
         )
         
+        # ✅ 自动设置 Bucket Policy，确保 blocked 对象无法访问
+        self._setup_bucket_policy()
+        
         logger.info("违规图片处理器初始化完成")
+    
+    def _setup_bucket_policy(self):
+        """
+        设置 Bucket Policy，拒绝访问带 blocked 标签的对象
+        对所有存储桶生效
+        """
+        try:
+            buckets = self.minio.list_buckets()
+            for bucket in buckets:
+                logger.info(f"为存储桶 {bucket} 设置 Block Policy...")
+                self.minio.set_bucket_policy_block_tagged_objects(bucket)
+            logger.info("✅ 所有存储桶的 Block Policy 设置完成")
+        except Exception as e:
+            logger.error(f"⚠️ 设置 Bucket Policy 失败: {e}")
+            logger.warning("⚠️ 违规图片可能仍然可以公开访问，请手动配置 Bucket Policy")
     
     def get_violations(self, violation_type: str = None, 
                       confidence_threshold: float = 0.0,
@@ -137,7 +155,7 @@ class ViolationHandler:
                     # ✅ 事务保护：先设置 MinIO 标签，再更新数据库
                     try:
                         # 设置对象为blocked状态
-                        self.minio.set_object_acl(bucket, object_key, 'private')
+                        self.minio.set_object_blocked(bucket, object_key, is_blocked=True)
                         
                         # 更新数据库记录
                         self.db.execute_query(
@@ -150,7 +168,7 @@ class ViolationHandler:
                         # ✅ 如果数据库更新失败，回滚 MinIO 操作
                         logger.error(f"    ✗ 数据库更新失败，尝试回滚 MinIO 操作...")
                         try:
-                            self.minio.set_object_acl(bucket, object_key, 'public')
+                            self.minio.set_object_blocked(bucket, object_key, is_blocked=False)
                         except:
                             logger.error(f"    ✗ MinIO 回滚失败，需要手动处理")
                         raise  # 重新抛出异常
@@ -203,7 +221,7 @@ class ViolationHandler:
                     # ✅ 事务保护：先恢复 MinIO 标签，再更新数据库
                     try:
                         # 恢复对象为正常状态
-                        self.minio.set_object_acl(bucket, object_key, 'public')
+                        self.minio.set_object_blocked(bucket, object_key, is_blocked=False)
                         
                         # 更新数据库记录（只清除blocked标记，保留违规状态）
                         self.db.execute_query(
@@ -216,7 +234,7 @@ class ViolationHandler:
                         # ✅ 如果数据库更新失败，回滚 MinIO 操作
                         logger.error(f"    ✗ 数据库更新失败，尝试回滚 MinIO 操作...")
                         try:
-                            self.minio.set_object_acl(bucket, object_key, 'private')
+                            self.minio.set_object_blocked(bucket, object_key, is_blocked=True)
                         except:
                             logger.error(f"    ✗ MinIO 回滚失败，需要手动处理")
                         raise  # 重新抛出异常

@@ -1,0 +1,35 @@
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+.Python
+*.egg-info
+
+# Virtual env
+venv
+.venv
+env
+
+# IDE / OS
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# Runtime artifacts (mounted as volumes, not baked into image)
+logs/
+*.log
+.env
+
+# Docs (not needed inside the image)
+docs/
+*.md

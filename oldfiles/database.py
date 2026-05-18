@@ -376,12 +376,12 @@ class ImageDatabase:
                 violation_description = VALUES(violation_description),
                 confidence = VALUES(confidence),
                 suggestion = VALUES(suggestion),
-                blocked = VALUES(blocked),  -- ✅ 添加 blocked 字段更新
+                blocked = VALUES(blocked),
                 ims_result = VALUES(ims_result),
                 ims_request_id = VALUES(ims_request_id),
                 scan_status = VALUES(scan_status),
                 error_message = VALUES(error_message),
-                first_seen_at = COALESCE(first_seen_at, VALUES(first_seen_at)),  -- ✅ 保持原值
+                first_seen_at = IF(first_seen_at IS NULL, VALUES(first_seen_at), first_seen_at),
                 last_scanned_at = NOW(),
                 updated_at = NOW()
         """

@@ -1,0 +1,45 @@
+version: '3.8'
+
+# 图片内容安全扫描器 —— 容器化运行
+# 默认使用宿主机网络访问外部 MySQL / MinIO
+
+services:
+  scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ims-scanner
+    restart: "no"
+    environment:
+      # MinIO
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-localhost:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:-images}
+      QUARANTINE_BUCKET_NAME: ${QUARANTINE_BUCKET_NAME:-quarantine}
+
+      # 腾讯云 IMS
+      TENCENT_SECRET_ID: ${TENCENT_SECRET_ID}
+      TENCENT_SECRET_KEY: ${TENCENT_SECRET_KEY}
+      TENCENT_REGION: ${TENCENT_REGION:-ap-guangzhou}
+
+      # MySQL
+      MYSQL_HOST: ${MYSQL_HOST:-localhost}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_USER: ${MYSQL_USER:-root}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-image_security}
+
+      # 扫描参数
+      HASH_SIZE: ${HASH_SIZE:-8}
+      SCAN_PREFIX: ${SCAN_PREFIX:-}
+      FORCE_RESCAN: ${FORCE_RESCAN:-false}
+      SCAN_LIMIT: ${SCAN_LIMIT:-}
+
+      TZ: Asia/Shanghai
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    network_mode: ${DOCKER_NETWORK_MODE:-host}
+    command: ["python", "scanner.py"]

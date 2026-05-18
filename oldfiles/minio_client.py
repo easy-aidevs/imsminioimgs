@@ -163,36 +163,90 @@ class MinIOClient:
             logger.error(f"检查存储桶存在性失败: {e}")
             return False
     
-    def set_object_acl(self, bucket_name: str, object_name: str, acl: str = 'private'):
+    def set_object_blocked(self, bucket_name: str, object_name: str, is_blocked: bool = True):
         """
-        设置对象访问权限
+        设置对象为blocked状态（通过标签标记 + Bucket Policy）
+        
+        注意: MinIO不支持直接设置单个对象的ACL
+        实现方式:
+        1. 给对象添加标签 blocked=true
+        2. 需要配合 Bucket Policy 才能真正阻止访问
         
         Args:
             bucket_name: 存储桶名称
             object_name: 对象名称
-            acl: 访问控制列表 ('private', 'public-read', 'public-read-write', 'authenticated-read')
+            is_blocked: 是否标记为blocked（True=违规，False=正常）
         """
         try:
-            # MinIO使用set_object_tags来标记对象状态，或者通过policy控制
-            # 这里我们使用tagging来标记违规图片
             from minio.datatypes import ObjectTags
             
-            if acl == 'private':
+            if is_blocked:
                 # 设置为违规状态，添加标签
                 tags = ObjectTags()
                 tags["status"] = "violation"
                 tags["blocked"] = "true"
                 self.client.set_object_tags(bucket_name, object_name, tags)
-                logger.debug(f"设置对象为违规状态: {bucket_name}/{object_name}")
-            elif acl == 'public':
+                logger.info(f"✅ 已标记对象为blocked: {bucket_name}/{object_name}")
+                logger.warning("⚠️ 注意: 仅设置标签不会阻止访问，需要配置Bucket Policy")
+            else:
                 # 恢复为正常状态，清除标签
                 self.client.delete_object_tags(bucket_name, object_name)
-                logger.debug(f"恢复对象为正常状态: {bucket_name}/{object_name}")
-            else:
-                raise ValueError(f"不支持的ACL类型: {acl}")
+                logger.info(f"✅ 已清除对象blocked标记: {bucket_name}/{object_name}")
                 
-        except S3Error as e:
-            logger.error(f"设置对象权限失败 [{bucket_name}/{object_name}]: {e}")
+        except Exception as e:
+            logger.error(f"设置对象blocked状态失败 [{bucket_name}/{object_name}]: {e}")
+            raise
+    
+    def set_bucket_policy_block_tagged_objects(self, bucket_name: str):
+        """
+        设置 Bucket Policy，拒绝访问带有 blocked=true 标签的对象
+        
+        这样当对象被标记为 blocked 后，将无法通过公开 URL 访问
+        
+        Args:
+            bucket_name: 存储桶名称
+        """
+        try:
+            import json
+            
+            # 创建 Bucket Policy，拒绝访问带 blocked=true 标签的对象
+            policy = {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Deny",
+                        "Principal": {"AWS": ["*"]},
+                        "Action": ["s3:GetObject"],
+                        "Resource": [f"arn:aws:s3:::{bucket_name}/*"],
+                        "Condition": {
+                            "StringEquals": {
+                                "s3:ExistingObjectTag/blocked": "true"
+                            }
+                        }
+                    }
+                ]
+            }
+            
+            policy_json = json.dumps(policy)
+            self.client.set_bucket_policy(bucket_name, policy_json)
+            logger.info(f"✅ 已设置 Bucket Policy，拒绝访问带 blocked 标签的对象: {bucket_name}")
+            
+        except Exception as e:
+            logger.error(f"设置 Bucket Policy 失败 [{bucket_name}]: {e}")
+            raise
+    
+    def remove_bucket_policy(self, bucket_name: str):
+        """
+        移除 Bucket Policy
+        
+        Args:
+            bucket_name: 存储桶名称
+        """
+        try:
+            self.client.delete_bucket_policy(bucket_name)
+            logger.info(f"✅ 已移除 Bucket Policy: {bucket_name}")
+        except Exception as e:
+            logger.error(f"移除 Bucket Policy 失败 [{bucket_name}]: {e}")
             raise
     
     def get_object_acl(self, bucket_name: str, object_name: str) -> dict:

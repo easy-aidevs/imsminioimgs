@@ -7,8 +7,7 @@
 - **[快速参考](docs/QUICK_REFERENCE.md)** - 快速开始、配置、常见问题
 - **[完整逻辑说明](docs/SCANNING_LOGIC.md)** - 详细的扫描流程、去重机制、性能分析
 - **[性能优化方案](docs/PERFORMANCE_OPTIMIZATION.md)** - 大规模场景优化建议
-- **[数据库优化](docs/DATABASE_OPTIMIZATION.md)** - 表结构设计和索引优化
-- **[违规图片处理](docs/VIOLATION_HANDLING_PERMISSIONS.md)** - 基于MinIO标签的权限控制
+- **[MinIO访问控制](docs/MINIO_ACCESS_CONTROL.md)** - 违规图片权限控制
 
 ## ✨ 核心特性
 
@@ -81,7 +80,7 @@ python handle_violations.py delete-blocked
 - ✅ 可快速恢复
 - ✅ 性能更好
 
-**详细说明**: [docs/VIOLATION_HANDLING_PERMISSIONS.md](docs/VIOLATION_HANDLING_PERMISSIONS.md)
+**详细说明**: [docs/MINIO_ACCESS_CONTROL.md](docs/MINIO_ACCESS_CONTROL.md)
 
 ## 📋 必要配置
 
@@ -171,10 +170,10 @@ imsminioimgs/
 所有详细文档都在 `docs/` 目录中：
 
 - **[docs/INDEX.md](docs/INDEX.md)** - 文档导航索引 ⭐从这里开始
-- **[docs/README.md](docs/README.md)** - 项目详细说明
 - **[docs/USAGE.md](docs/USAGE.md)** - 完整使用指南
 - **[docs/QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md)** - 快速参考卡片
 - **[docs/DOCKER_GUIDE.md](docs/DOCKER_GUIDE.md)** - Docker部署指南
+- **[docs/LOG_GUIDE.md](docs/LOG_GUIDE.md)** - 日志系统指南
 
 ## 🔧 常用命令
 
