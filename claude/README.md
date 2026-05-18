@@ -135,6 +135,28 @@ TENCENT_SECRET_KEY=...
 - 旧的内存特征缓存（LRU/full/none 三种策略）已移除。相似检测直接查库，逻辑更简单；大规模场景请在 `feature_hash` 上加索引或换向量检索。
 - 扫描器不再生成 `violations.txt`，查违规统一走 `handle_violations.py list`。
 
+## 测试
+
+```bash
+# 建虚拟环境装依赖
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt pytest
+
+# 跑全部测试（不需要 MySQL / MinIO / 腾讯云凭据，全部 mock）
+.venv/bin/python -m pytest tests/ -v
+```
+
+| 测试文件 | 关注点 |
+|---------|--------|
+| `test_image_feature.py` | Key 确定性、特征哈希、汉明距离边界（含 `""` 异常输入） |
+| `test_tencent_ims_parse.py` | confidence 0–100 → 0–1 归一化、Suggestion 映射、违规类型映射 |
+| `test_database_queries.py` | upsert 字段数对齐、空 hash 防御过滤、ON DUPLICATE 子句 |
+| `test_scanner_logic.py` | 三层去重的分支路径、`force_rescan` 行为、错误记录 key 长度有界 |
+| `test_handle_violations.py` | block/restore/delete 的 MinIO+DB 调用顺序、源缺失分支、tag 失败容错 |
+| `test_minio_client.py` | move_object 顺序、`object_exists` 错误码分支、tag 操作 |
+
+所有审计修复都有对应回归测试（confidence 截断、空 hash 误用、key 溢出）。
+
 ## 详细文档
 
 - [docs/SCANNING_LOGIC.md](docs/SCANNING_LOGIC.md)：扫描流程详解（三层去重、相似检测的查库策略、统计字段含义、强制重扫）
