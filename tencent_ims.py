@@ -73,16 +73,20 @@ class TencentIMSScanner:
                 - request_id: 请求ID (str)
         """
         try:
+            import base64
+            
             # 创建请求对象
             req = models.ImageModerationRequest()
             
-            # 设置参数
+            # 设置参数 - 使用Base64编码图片数据
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
             params = {
-                "Content": image_data.hex(),  # 图片Base64编码的十六进制字符串
-                "DataEndpoint": "",
+                "Content": image_base64,  # 图片Base64编码
                 "BizType": biz_type or "default"
             }
             req.from_json_string(json.dumps(params))
+            
+            logger.debug(f"准备调用IMS API - 图片大小: {len(image_data)} bytes, Base64长度: {len(image_base64)}")
             
             # 调用API
             resp = self.client.ImageModeration(req)
@@ -99,7 +103,17 @@ class TencentIMSScanner:
             return result
             
         except Exception as e:
-            logger.error(f"腾讯云IMS扫描失败: {e}")
+            logger.error(f"❌ 腾讯云IMS扫描失败")
+            logger.error(f"  - 错误类型: {type(e).__name__}")
+            logger.error(f"  - 错误信息: {str(e)}")
+            logger.error(f"  - 图片数据大小: {len(image_data) if 'image_data' in locals() else 'N/A'} bytes")
+            if hasattr(e, 'code'):
+                logger.error(f"  - API错误码: {e.code}")
+            if hasattr(e, 'message'):
+                logger.error(f"  - API错误消息: {e.message}")
+            if hasattr(e, 'requestId'):
+                logger.error(f"  - RequestID: {e.requestId}")
+            logger.exception("详细堆栈信息:")
             raise
     
     def _parse_response(self, resp) -> Dict:
