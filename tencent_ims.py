@@ -78,7 +78,7 @@ class TencentIMSScanner:
             # 创建请求对象
             req = models.ImageModerationRequest()
             
-            # 设置参数 - 直接设置属性，避免null值
+            # 设置参数 - 直接设置属性（3.0.x版本稳定）
             image_base64 = base64.b64encode(image_data).decode('utf-8')
             req.Content = image_base64  # 图片Base64编码
             req.BizType = biz_type or "default"
