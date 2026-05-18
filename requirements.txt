@@ -2,8 +2,8 @@ minio==7.2.0
 Pillow==10.2.0
 imagehash==4.3.1
 numpy==1.26.4
-tencentcloud-sdk-python-common==3.0.1076
-tencentcloud-sdk-python-ims==3.0.1076
+tencentcloud-sdk-python-common==3.1.98
+tencentcloud-sdk-python-ims==3.1.96
 mysql-connector-python==8.3.0
 python-dotenv==1.0.1
 requests==2.31.0

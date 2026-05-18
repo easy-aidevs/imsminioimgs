@@ -78,9 +78,12 @@ class TencentIMSScanner:
             # 创建请求对象
             req = models.ImageModerationRequest()
             
-            # 设置参数 - 直接设置属性（3.0.x版本稳定）
+            # 设置参数 - 使用Base64编码图片数据
             image_base64 = base64.b64encode(image_data).decode('utf-8')
-            req.Content = image_base64  # 图片Base64编码
+            
+            # 重要：SDK中的属性名是 FileContent，不是 Content！
+            # 直接赋值属性（避免from_json_string产生null值）
+            req.FileContent = image_base64  # ✅ 正确的属性名
             req.BizType = biz_type or "default"
             
             logger.debug(f"准备调用IMS API - 图片大小: {len(image_data)} bytes, Base64长度: {len(image_base64)}")
