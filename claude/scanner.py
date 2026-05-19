@@ -370,9 +370,10 @@ class ImageSecurityScanner:
         """单张图片处理流程：三层去重 -> IMS 检测 -> 写库。"""
 
         # 第1层：路径去重——同一 MinIO 路径已扫描过，直接跳过（不下载）。
+        # 注意：scan_status='failed' 的记录不算"已完成"，需要重新扫描。
         if not force_rescan:
             existing = self.db.find_by_bucket_object(bucket, object_name)
-            if existing:
+            if existing and existing.get('scan_status') != 'failed':
                 self.stats['path_reused'] += 1
                 if existing.get('is_violation'):
                     self.stats['violations'] += 1
