@@ -9,27 +9,53 @@
 | `scanner.py` | **分析**：遍历 MinIO 桶 → 调用腾讯云 IMS → 写库 |
 | `handle_violations.py` | **操作**：基于扫描结果，对违规图片做 block / restore / delete |
 
-## 处置工作流
+## 处置工作流（三阶段）
 
 ```
 扫描器写库（is_violation=1）
         │
         ▼
-   list   查看违规清单
+  ═══════════════════════════════════════════════════════════
+   🔸 第一阶段：发现 & 标记私密（原桶，隐藏观察）
+  ═══════════════════════════════════════════════════════════
+        │
+        ├─→ list               查看新增违规
+        │
+        ├─→ mark-private       标记为私密（原桶，无法访问）
+        │                      ↓
+        │                   [观察期 24-48 小时]
+        │                   [监控业务日志]
+        │
+        ├─→ list-private       查看观察中的
+        │
+   ┌────┴────────────────────────────────────────────────┐
+   │                                                       │
+   │  ═══════════════════════════════════════════════════ │
+   │   🟡 第二阶段：观察决策                               │
+   │  ═══════════════════════════════════════════════════ │
+   │                                                       │
+   ├─→ confirm-quarantine     观察正常 → 移到隔离桶      │
+   │   (blocked=2, 不可逆)                               │
+   │                                                       │
+   └─→ restore-public         观察异常 → 改回公开        │
+       (blocked=0, 视为误判)                            │
+        │
+        ├─→ list-quarantined    查看已隔离的
+        │
+  ═══════════════════════════════════════════════════════════
+   🔴 第三阶段：彻底删除（不可恢复）
+  ═══════════════════════════════════════════════════════════
+        │
+        ├─→ delete --ids x,y    从隔离桶删除，清除记录
         │
         ▼
-   block  把违规图片从业务桶移到 隔离桶  ← URL 失效，用户无法访问
-        │                              ← 同时打 violation 标签做资源标记
-        ▼
-  人工复核
-        │
-   ┌────┴────┐
-   ▼         ▼
-restore    delete
-移回原桶    从隔离桶彻底删除
+       完成
 ```
 
-**"禁止访问"的本质是迁移，不是 ACL/policy**：业务桶用户能拿到的 URL 在隔离桶里不存在，自然无法访问。tag 仅用于标记资源属性。
+**核心机制：**
+- **私密状态**（blocked=1）：原桶中的对象，通过 MinIO 权限无法公开访问，但仍可随时恢复
+- **隔离状态**（blocked=2）：对象移入隔离桶，只能删除，不可恢复
+- **观察期**：充分验证后再确认隔离，降低误判风险
 
 ## 快速开始
 
@@ -44,35 +70,46 @@ vim .env
 # 3. 初始化数据库
 mysql -u root -p < schema.sql
 
-# 4. 扫描
+# 4. 扫描（可选，仅需腾讯云 IMS）
 python scanner.py
 
-# 5. 处置违规图片
-python handle_violations.py list
-python handle_violations.py block --type gambling
-python handle_violations.py list-blocked
-python handle_violations.py restore --ids 1,2   # 误判恢复
-python handle_violations.py delete --ids 3,4    # 彻底删除
+# 5. 处置违规图片（三阶段流程）
+
+# 第一阶段：标记为私密
+python handle_violations.py list               # 查看新增违规
+python handle_violations.py mark-private --type gambling  # 标记为私密
+
+# 第二阶段：观察并决策
+python handle_violations.py list-private       # 查看观察中的
+python handle_violations.py confirm-quarantine --ids 1,2,3    # 确认隔离
+# 或
+python handle_violations.py restore-public --ids 4,5          # 改回公开
+
+# 第三阶段：彻底删除
+python handle_violations.py list-quarantined   # 查看已隔离
+python handle_violations.py delete --ids 1,2,3              # 删除
 ```
+
+**详见 [`SETUP_AND_USAGE.md`](SETUP_AND_USAGE.md) 完整使用说明。**
 
 Docker 部署：`docker-compose up`
 
 ## 必填配置
 
-```ini
-MINIO_ENDPOINT=localhost:9000
-MINIO_ACCESS_KEY=...
-MINIO_SECRET_KEY=...
-MINIO_BUCKET_NAME=images          # 业务桶
-QUARANTINE_BUCKET_NAME=quarantine # 隔离桶（不公开访问）
+| 配置 | 说明 | 示例 |
+|------|------|------|
+| `MINIO_ENDPOINT` | MinIO 地址 | `localhost:9000` |
+| `MINIO_ACCESS_KEY` | MinIO 访问密钥 | - |
+| `MINIO_SECRET_KEY` | MinIO 密钥 | - |
+| `MINIO_BUCKET_NAME` | 业务图片桶 | `images` |
+| `QUARANTINE_BUCKET_NAME` | 隔离桶 | `quarantine` |
+| `MYSQL_HOST` | MySQL 地址 | `localhost` |
+| `MYSQL_PASSWORD` | MySQL 密码 | - |
+| `MYSQL_DATABASE` | 数据库名 | `image_security` |
+| `TENCENT_SECRET_ID` | 腾讯云 ID（仅 scanner.py 需要） | - |
+| `TENCENT_SECRET_KEY` | 腾讯云密钥（仅 scanner.py 需要） | - |
 
-MYSQL_HOST=localhost
-MYSQL_PASSWORD=...
-MYSQL_DATABASE=image_security
-
-TENCENT_SECRET_ID=...
-TENCENT_SECRET_KEY=...
-```
+**详见 [`SETUP_AND_USAGE.md`](SETUP_AND_USAGE.md#配置详解) 的配置详解部分。**
 
 ## 三层去重（节省 API 费用）
 
