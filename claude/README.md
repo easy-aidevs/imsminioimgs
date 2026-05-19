@@ -2,12 +2,25 @@
 
 基于腾讯云 IMS 的图片内容安全检测系统。两个入口、隔离桶处置、感知哈希去重节省 API 费用。
 
-## 两个入口
+## 📚 文档导航
 
-| 入口 | 作用 |
+> 新用户？请先阅读 **[文档导航中心](./docs/INDEX.md)** 快速找到你需要的文档！
+
+| 角色 | 推荐文档 | 时间 |
+|------|---------|------|
+| 🎯 我要快速开始 | [快速开始](./docs/QUICK_START.md) | 5 分钟 |
+| 🆕 我是第一次用 | [快速开始](./docs/QUICK_START.md) → [使用指南](./docs/USAGE.md) | 30 分钟 |
+| 💻 我是开发者 | [系统架构](./docs/ARCHITECTURE.md) → [API 参考](./docs/API_REFERENCE.md) | 1 小时 |
+| 🛠️ 我是运维 | [Docker 部署](./docs/DOCKER.md) → [生产部署](./docs/PRODUCTION.md) | 1 小时 |
+
+## 两个工具
+
+| 工具 | 作用 |
 |------|------|
-| `scanner.py` | **分析**：遍历 MinIO 桶 → 调用腾讯云 IMS → 写库 |
-| `handle_violations.py` | **操作**：基于扫描结果，对违规图片做 block / restore / delete |
+| `scanner.py` | **扫描**：遍历 MinIO 桶 → 调用腾讯云 IMS → 结果写库 |
+| `handle_violations.py` | **处置**：标记私密 → 观察决策 → 隔离/恢复/删除 |
+
+👉 详见 [使用指南](./docs/USAGE.md)
 
 ## 处置工作流（三阶段）
 
