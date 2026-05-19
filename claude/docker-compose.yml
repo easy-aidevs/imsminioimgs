@@ -29,24 +29,19 @@ services:
   # MySQL 数据库（可选 - 如果宿主机已有可跳过）
   # 取消下面的注释来启用容器化 MySQL
   #
-  # mysql:
-  #   image: mysql:8.0
-  #   container_name: ims-mysql
-  #   restart: unless-stopped
-  #   environment:
-  #     MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-root123}
-  #     MYSQL_DATABASE: ${MYSQL_DATABASE:-image_security}
-  #     TZ: Asia/Shanghai
-  #   ports:
-  #     - "3306:3306"
-  #   volumes:
-  #     - mysql_data:/var/lib/mysql
-  #     - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
-  #   healthcheck:
-  #     test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 5
+  mysql:
+    image: mysql:8.0
+    container_name: ims-mysql
+    restart: "no"
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-Odks#disnc03nIo5Cdui4aLvnf}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-image_security}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+       - ims-network
 
   # MinIO 对象存储（可选 - 如果宿主机已有可跳过）
   # 取消下面的注释来启用容器化 MinIO
@@ -105,7 +100,7 @@ services:
       MYSQL_HOST: ${MYSQL_HOST:-localhost}
       MYSQL_PORT: ${MYSQL_PORT:-3306}
       MYSQL_USER: ${MYSQL_USER:-root}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-Odks#disnc03nIo5Cdui4aLvnf}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-image_security}
 
       # 扫描参数
@@ -115,15 +110,13 @@ services:
       SCAN_LIMIT: ${SCAN_LIMIT:-}
 
       TZ: Asia/Shanghai
-
+    depends_on:
+      - mysql
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env:ro
-
-    # 网络模式
-    # host:   容器共享宿主机网络（推荐，访问 localhost 服务）
-    # bridge: 容器独立网络（需要用 host.docker.internal 或 service 名）
-    network_mode: ${DOCKER_NETWORK_MODE:-host}
+    networks:
+      - ims-network
 
     # 默认命令：显示帮助（实际执行时会被覆盖）
     command: ["python", "-c", "print('Scanner 已就绪。\\n使用: docker-compose run --rm scanner python scanner.py')"]
@@ -150,23 +143,27 @@ services:
       MYSQL_HOST: ${MYSQL_HOST:-localhost}
       MYSQL_PORT: ${MYSQL_PORT:-3306}
       MYSQL_USER: ${MYSQL_USER:-root}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-Odks#disnc03nIo5Cdui4aLvnf}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-image_security}
 
       TZ: Asia/Shanghai
-
+    depends_on:
+      - mysql
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env:ro
-
-    network_mode: ${DOCKER_NETWORK_MODE:-host}
+    networks:
+      - ims-network
 
     # 默认命令：显示帮助（实际执行时会被覆盖）
     command: ["python", "-c", "print('Handler 已就绪。\\n使用: docker-compose run --rm handler python handle_violations.py [command]')"]
-
+    
+networks:
+  ims-network:
+    driver: bridge
 # 命名卷（仅在使用容器化 MySQL/MinIO 时需要）
-# volumes:
-#   mysql_data:
-#     driver: local
+volumes:
+  mysql_data:
+    driver: local
 #   minio_data:
 #     driver: local
