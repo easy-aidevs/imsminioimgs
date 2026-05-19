@@ -1,17 +1,91 @@
 version: '3.8'
 
-# 图片内容安全扫描器 —— 容器化运行
-# 默认使用宿主机网络访问外部 MySQL / MinIO
+# ================================================================
+# 图片内容安全扫描系统 - Docker 容器编排配置
+# ================================================================
+#
+# 用途：
+#   - scanner:  扫描 MinIO 中的图片，检测违规内容
+#   - handler:  处置违规图片（三阶段流程）
+#
+# 依赖服务（可选）：
+#   - mysql:    数据库（默认使用宿主机）
+#   - minio:    对象存储（默认使用宿主机）
+#
+# 快速开始：
+#   docker-compose run --rm scanner python scanner.py
+#   docker-compose run --rm handler python handle_violations.py list
+#
+# 参考：
+#   - DOCKER_DEPLOYMENT.md: 完整部署指南
+#   - TWO_ENTRY_POINTS.md:  工具使用说明
 
 services:
+
+  # ================================================================
+  # 依赖服务（可选）
+  # ================================================================
+
+  # MySQL 数据库（可选 - 如果宿主机已有可跳过）
+  # 取消下面的注释来启用容器化 MySQL
+  #
+  # mysql:
+  #   image: mysql:8.0
+  #   container_name: ims-mysql
+  #   restart: unless-stopped
+  #   environment:
+  #     MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-root123}
+  #     MYSQL_DATABASE: ${MYSQL_DATABASE:-image_security}
+  #     TZ: Asia/Shanghai
+  #   ports:
+  #     - "3306:3306"
+  #   volumes:
+  #     - mysql_data:/var/lib/mysql
+  #     - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+  #   healthcheck:
+  #     test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+  # MinIO 对象存储（可选 - 如果宿主机已有可跳过）
+  # 取消下面的注释来启用容器化 MinIO
+  #
+  # minio:
+  #   image: minio/minio:latest
+  #   container_name: ims-minio
+  #   restart: unless-stopped
+  #   environment:
+  #     MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+  #     MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+  #     TZ: Asia/Shanghai
+  #   ports:
+  #     - "9000:9000"
+  #     - "9001:9001"
+  #   volumes:
+  #     - minio_data:/data
+  #   command: server /data --console-address ":9001"
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+  # ================================================================
+  # 应用服务
+  # ================================================================
+
+  # 扫描器服务
+  # 功能：遍历 MinIO，调用腾讯云 IMS，写入数据库
   scanner:
     build:
       context: .
       dockerfile: Dockerfile
+    image: ims:scanner
     container_name: ims-scanner
     restart: "no"
     environment:
-      # MinIO
+      # MinIO 配置
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-localhost:9000}
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
@@ -19,12 +93,15 @@ services:
       MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:-images}
       QUARANTINE_BUCKET_NAME: ${QUARANTINE_BUCKET_NAME:-quarantine}
 
-      # 腾讯云 IMS
+      # 腾讯云 IMS 配置
       TENCENT_SECRET_ID: ${TENCENT_SECRET_ID}
       TENCENT_SECRET_KEY: ${TENCENT_SECRET_KEY}
       TENCENT_REGION: ${TENCENT_REGION:-ap-guangzhou}
 
-      # MySQL
+      # MySQL 配置
+      # 使用 host.docker.internal 访问 Mac/Windows 宿主机服务
+      # 使用 172.17.0.1 访问 Linux Docker0 网桥
+      # 或直接使用服务名 mysql（如果使用容器化 MySQL）
       MYSQL_HOST: ${MYSQL_HOST:-localhost}
       MYSQL_PORT: ${MYSQL_PORT:-3306}
       MYSQL_USER: ${MYSQL_USER:-root}
@@ -38,8 +115,58 @@ services:
       SCAN_LIMIT: ${SCAN_LIMIT:-}
 
       TZ: Asia/Shanghai
+
     volumes:
       - ./logs:/app/logs
       - ./.env:/app/.env:ro
+
+    # 网络模式
+    # host:   容器共享宿主机网络（推荐，访问 localhost 服务）
+    # bridge: 容器独立网络（需要用 host.docker.internal 或 service 名）
     network_mode: ${DOCKER_NETWORK_MODE:-host}
-    command: ["python", "scanner.py"]
+
+    # 默认命令：显示帮助（实际执行时会被覆盖）
+    command: ["python", "-c", "print('Scanner 已就绪。\\n使用: docker-compose run --rm scanner python scanner.py')"]
+
+  # 违规处置服务
+  # 功能：标记私密、隔离、恢复、删除等处置操作
+  handler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ims:handler
+    container_name: ims-handler
+    restart: "no"
+    environment:
+      # MinIO 配置
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-localhost:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:-images}
+      QUARANTINE_BUCKET_NAME: ${QUARANTINE_BUCKET_NAME:-quarantine}
+
+      # MySQL 配置
+      MYSQL_HOST: ${MYSQL_HOST:-localhost}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_USER: ${MYSQL_USER:-root}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-image_security}
+
+      TZ: Asia/Shanghai
+
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+
+    network_mode: ${DOCKER_NETWORK_MODE:-host}
+
+    # 默认命令：显示帮助（实际执行时会被覆盖）
+    command: ["python", "-c", "print('Handler 已就绪。\\n使用: docker-compose run --rm handler python handle_violations.py [command]')"]
+
+# 命名卷（仅在使用容器化 MySQL/MinIO 时需要）
+# volumes:
+#   mysql_data:
+#     driver: local
+#   minio_data:
+#     driver: local
