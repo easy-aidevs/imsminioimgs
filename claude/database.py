@@ -69,9 +69,14 @@ class ImageDatabase:
         return rows[0] if rows else None
 
     def find_by_key(self, key: str) -> Optional[Dict]:
-        """按内容 Key 查记录（内容级去重；返回任一已扫描过的同内容记录）。"""
+        """按内容 Key 查记录（内容级去重；返回已完成扫描的同内容记录）。
+
+        必须过滤 scan_status='completed'：若返回 failed 记录，
+        _write_reused 会把 violation_type=NULL 等脏数据复制给新路径。
+        """
         rows = self.execute_query(
-            "SELECT * FROM image_scan_records WHERE `key` = %s LIMIT 1",
+            "SELECT * FROM image_scan_records "
+            "WHERE `key` = %s AND scan_status = 'completed' LIMIT 1",
             (key,),
             fetch=True,
         )
@@ -87,7 +92,8 @@ class ImageDatabase:
         rows = self.execute_query(
             """
             SELECT `key`, bucket_name, object_key, feature_hash,
-                   violation_type, violation_label, violation_description,
+                   violation_type, violation_label, violation_label_cn,
+                   sub_label, sub_label_cn,
                    confidence, suggestion, is_violation
             FROM image_scan_records
             WHERE scan_status = 'completed'
@@ -164,11 +170,12 @@ class ImageDatabase:
                 `key`, feature_hash, feature_hash_dhash, feature_hash_ahash,
                 feature_hash_phash, bucket_name, object_key, file_size,
                 content_type, is_violation, violation_type, violation_label,
-                violation_description, confidence, suggestion, blocked, ims_result,
+                violation_label_cn, sub_label, sub_label_cn,
+                confidence, suggestion, blocked, ims_result,
                 ims_request_id, scan_status, error_message, first_seen_at, last_scanned_at
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON DUPLICATE KEY UPDATE
                 `key` = VALUES(`key`),
@@ -179,10 +186,11 @@ class ImageDatabase:
                 is_violation = VALUES(is_violation),
                 violation_type = VALUES(violation_type),
                 violation_label = VALUES(violation_label),
-                violation_description = VALUES(violation_description),
+                violation_label_cn = VALUES(violation_label_cn),
+                sub_label = VALUES(sub_label),
+                sub_label_cn = VALUES(sub_label_cn),
                 confidence = VALUES(confidence),
                 suggestion = VALUES(suggestion),
-                blocked = VALUES(blocked),
                 ims_result = VALUES(ims_result),
                 ims_request_id = VALUES(ims_request_id),
                 scan_status = VALUES(scan_status),
@@ -205,7 +213,9 @@ class ImageDatabase:
             record.get('is_violation', 0),
             record.get('violation_type'),
             record.get('violation_label'),
-            record.get('violation_description'),
+            record.get('violation_label_cn'),
+            record.get('sub_label'),
+            record.get('sub_label_cn'),
             record.get('confidence'),
             record.get('suggestion'),
             record.get('blocked', 0),

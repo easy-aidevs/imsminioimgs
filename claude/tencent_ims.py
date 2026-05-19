@@ -15,34 +15,128 @@ from loguru import logger
 class TencentIMSScanner:
     """腾讯云图片内容安全扫描器"""
     
-    # 顶层 Label → violation_type 映射（基于 IMS API 实际返回值）
-    VIOLATION_TYPE_MAP = {
-        'Porn': 'porn',          # 色情
-        'Sexy': 'porn',          # 性感擦边
-        'Ad': 'ads',             # 广告（API 返回 Ad，非 Ads）
-        'Polity': 'politics',    # 政治敏感（API 返回 Polity，非 Politics）
-        'Politics': 'politics',  # 兼容旧值
-        'Terror': 'terrorism',   # 恐怖（API 返回 Terror）
-        'Terrorism': 'terrorism',
-        'Violence': 'violence',
-        'Contraband': 'contraband',
-        'Abuse': 'vulgar',       # 谩骂低俗（API 返回 Abuse，非 Vulgar）
-        'Vulgar': 'vulgar',
-        'Qrcode': 'qrcode',
-        'Teenager': 'other',     # 未成年人保护
-        'Spam': 'other',
-        'Others': 'other',
-        'Other': 'other',
+    LABEL_CN_MAP = {
+        'Polity': '政治',
+        'Porn': '色情',
+        'Sexy': '性感',
+        'Terror': '暴恐',
+        'Illegal': '违法',
+        'Religion': '宗教识别',
+        'Ad': '广告',
+        'Teenager': '未成年识别',
+        'Abuse': '谩骂',
+        'Normal': '正常',
     }
 
-    # Illegal 是大类，需借助 SubLabel 细分具体违规类型
-    ILLEGAL_SUBLABEL_MAP = {
-        'Gamble': 'gambling',    # 赌博
-        'Gambling': 'gambling',
-        'Drug': 'contraband',    # 毒品
-        'Weapon': 'contraband',  # 武器
-        'Bloody': 'violence',    # 血腥
-        'Others': 'other',
+    SUB_LABEL_CN_MAP = {
+        # Polity 政治
+        'NationalOfficial': '国部级领导人', 'NationalOfficialA': '正国级领导人',
+        'ProvincialOfficial': '省级领导人', 'CountryOfficial': '市/县级领导人',
+        'TWOfficial': '台湾地区领导人', 'HKOfficial': '香港特区领导人',
+        'MacaoOfficial': '澳门特区领导人', 'MainlandIllegalOfficial': '落马官员',
+        'MainlandOfficialRelative': '大陆地区领导人亲属', 'ForeignOfficial': '外国/地区政治人物',
+        'BadStar': '劣迹明星', 'Inferior': '劣迹网红',
+        'AntiParty': '反党人士', 'Splitter': '反动分裂分子',
+        'NaziCriminal': '纳粹战犯', 'Martyrs': '革命烈士',
+        'WarCriminal': '侵华战犯', 'HistoricalPerson': '历史人物',
+        'Terrorist': '恐怖分子头目', 'Cult': '邪教组织头目',
+        'AVStar': 'AV人物', 'PolityLogo': '政治实体-中性',
+        'SensitivePolityLogo': '政治实体-负面', 'PolityEvent': '政治事件',
+        'NanHaiZhuDao': '南海诸岛缺失', 'ZangNan': '藏南缺失',
+        'AKeSaiQin': '阿克赛钦缺失', 'TaiWan': '台湾岛错误',
+        'TianAnMen': '天安门', 'RMYXJiNianBei': '人民英雄纪念碑',
+        'RenMinDaHuiTang': '人民大会堂', 'RenMinDaHuiTangInner': '人民大会堂内部',
+        'HuaBiao': '华表', 'MinZhuNvShengXiang64': '64民主女神像',
+        'LadyLibertyHK': '香港民主女神像', 'JingGuoShengShe': '靖国神社',
+        'WeiLingTa': '慰灵塔', 'FengTianZhongLingTa': '奉天忠灵塔',
+        'GuoShangZhiZhu': '国殇之柱', 'MinZhuLieShiBei': '民主烈士纪念碑',
+        '64JiNianBei': '64纪念碑', 'GuoQiTouXiang': '头像国旗',
+        'GuoQiYingXiao': '国旗营销', 'WuRuGuoQi': '侮辱国旗',
+        'ZhengChangRMB': '正常人民币', 'DaLiangRMB': '大量人民币',
+        'RMBXuanFu': '人民币炫富', 'RMBYingXiao': '人民币营销',
+        'EGaoRMB': '恶搞人民币', 'FenShaoRMB': '焚烧人民币',
+        'TuYaRMB': '涂鸦人民币', 'RMBStack': '人民币堆叠',
+        'GuoHuiZhengShu': '含国徽证书', 'GuoHuiICKa': '含国徽卡证',
+        'GuoHuiWenJian': '含国徽文件', 'EGaoGuoHui': '恶搞国徽',
+        'CCPVirus': '中共病毒', 'JingGangShanA': '井冈山A', 'JingGangShanB': '井冈山B',
+        'Polity': '一号领导人', 'WorldMap': '世界地图', 'LocalMap': '区域地图',
+        'CountryHuman': '国家拟人', 'ChineseLeaderXiFeature': '一号领导特征影射',
+        'ChineseLeaderMaoFeature': '国家领导特征影射', 'YingSheGuoQi': '影射国旗',
+        '64Candle': '六四蜡烛影射', 'ChineseLeaderVariant': '一号变形',
+        'ChineseLeaderHairStyle': '一号领导发型',
+        'FeiGuanFangShiYongGuoHui': '非官方使用国徽',
+        'FeiGuanFangShiYongGuoQi': '非官方使用国旗',
+        'FeiGuanFangShiYongDiTu': '非官方使用地图',
+        'FeiGuanFangShiYongDangQiDangHui': '非官方使用党旗党徽',
+        'ZhengChangGuoQi': '正常国旗', 'ZhengChangGuoHui': '正常国徽',
+        'COVID-19': '新冠相关政治',
+        # Porn 色情
+        'SexyBehavior': '性行为画面', 'SM': 'SM',
+        'WomenPrivatePart': '女性下体裸露', 'WomenChest': '女性胸部裸露',
+        'MenPrivatePart': '男性下体裸露', 'ButtocksExposed': '臀部裸露',
+        'NakedChild': '儿童裸露', 'SexAids': '性用品',
+        'NakedAnimal': '动物裸露', 'TouchChest': '摸胸',
+        'TouchHip': '摸臀', 'TouchTriangle': '摸下体',
+        'Tongue': '吐舌挑逗', 'Lick': '舔舐动作',
+        'AnimalSex': '动物性行为', 'SexSecretion': '性分泌物',
+        'Suckle': '哺乳', 'ObjectShape': '物体形似',
+        'TongueKiss': '舌吻', 'WomenChestSideNaked': '侧乳露出',
+        'Naked': '裸体', 'Anus': '肛门',
+        'WomenChestBump': '女上激凸', 'WomenPrivatePartProtruding': '女下激凸',
+        'Endoscope': '女性下体内窥镜', 'MedicalPorn': '医学性器官',
+        'GridPorn': '图中图色情', 'ACGPregnancy': 'ACG色情孕妇',
+        'IPPorn': 'IP色情', 'ACGPornNew': 'ACG色情2.0',
+        # Sexy 性感
+        'NakedArt': '裸露艺术品', 'WomenSexy': '女性性感着装',
+        'MenSexy': '男性性感着装', 'WomenSexyBack': '女性性感-背部',
+        'WomenSexyChest': '女性性感-胸部', 'WomenSexyLeg': '女性性感-腿部',
+        'MiddleFinger': '竖中指', 'Kiss': '亲吻',
+        'HipCloseUp': '臀部性感', 'ChestCloseUp': '胸部特写',
+        'FootCloseUp': '足部性联想', 'VulgarLeg': '低俗腿部',
+        'VulgarChest': '低俗胸部', 'IntimateBehavior': '亲密行为',
+        'ShoulderBare': '性感肩', 'CrotchCloseUp': '男下激凸',
+        'MenNudity': '男上裸露', 'SeductivePose': '诱惑姿势',
+        'Stockings': '丝袜', 'LegCloseUp': '腿部特写',
+        'VulgarGesture': '低俗手势',
+        # Terror 暴恐
+        'Burka': '特殊服饰', 'Uniform': '军警制服',
+        'Gun': '枪等热武器', 'BigWeapon': '军事武器',
+        'Knife': '刀等冷兵器', 'Crowd': '人群聚集',
+        'Blood': '血腥画面', 'Bloody': '血腥画面',
+        'Fire': '火灾爆炸', 'SpecialCharacter': '特殊文字',
+        'ActsTerrorism': '暴恐行为', 'Horror': '惊悚',
+        'TerroristOrganization': '恐怖组织', 'PoliceCar': '警车',
+        'Bullet': '子弹',
+        # Illegal 违法
+        'Smoking': '吸烟', 'Drug': '吸毒',
+        'Gambling': '赌博', 'Gamble': '赌博',
+        'Drink': '喝酒', 'Fight': '打斗',
+        'CarLive': '车内直播', 'BedLive': '床上直播',
+        'Tattoo': '纹身', 'Contraband': '违禁品',
+        'PersonalPrivacy': '个人隐私', 'Nausea': '恶心画面',
+        'WithoutFace': '人脸空播', 'NoBody': '人体空播',
+        'Weapon': '武器违禁品',
+        # Religion 宗教
+        'ReligiousClothing': '宗教服饰', 'ReligiousObjects': '宗教物品',
+        'ReligiousElement': '宗教元素', 'ReligiousBehavior': '宗教行为',
+        # Ad 广告
+        'QrCode': '广告二维码', 'Qrcode': '广告二维码',
+        'AppLogo': '互联网应用台标', 'MovieLogo': '电影台标',
+        'CCTVLogo': '央视台标', 'LocalTVLogo': '地方卫视台标',
+        'ForeignVideoAppLogo': '海外视频应用台标', 'OlympicsLogo': '奥运台标',
+        'Phone': '手机', 'ForeignTVLogo': '海外电视台标',
+        'SexProductLogo': '性用品Logo', 'AntiChinaLogo': '辱华品牌Logo',
+        'AdvertisingLaw': '广告法', 'StateOwnedEnterpriseLogo': '国央企LOGO',
+        'DeceptiveImage': '干扰图',
+        # Teenager 未成年
+        'Minors': '未成年人出镜', 'MinorsPorn': '未成年人色情',
+        'MinorsSexy': '未成年人性感', 'MinorsIllegal': '未成年人违禁行为',
+        'Elsagate': '儿童邪典', 'ACGMinors': 'ACG未成年人',
+        'MinorsNew': '未成年形象',
+        # Abuse 谩骂
+        'PornographicAbuse': '色情谩骂', 'Abuse': '谩骂',
+        # Others / generic
+        'Others': '其他', 'Other': '其他',
     }
     
     def __init__(self, secret_id: str, secret_key: str, region: str = "ap-guangzhou"):
@@ -81,8 +175,10 @@ class TencentIMSScanner:
             Dict: 扫描结果，包含以下字段：
                 - is_violation: 是否违规 (bool)
                 - violation_type: 违规类型 (str)
-                - violation_label: 违规标签 (str)
-                - violation_description: 违规描述 (str)
+                - violation_label: IMS一级标签英文code (str)
+                - violation_label_cn: IMS一级标签中文名 (str)
+                - sub_label: IMS二级标签英文code (str)
+                - sub_label_cn: IMS二级标签中文名 (str)
                 - confidence: 置信度 (float, 0-1)
                 - suggestion: 建议操作 (str: Block/Review/Pass)
                 - raw_result: 原始返回结果 (dict)
@@ -146,7 +242,9 @@ class TencentIMSScanner:
             'is_violation': False,
             'violation_type': None,
             'violation_label': None,
-            'violation_description': None,
+            'violation_label_cn': None,
+            'sub_label': None,
+            'sub_label_cn': None,
             'confidence': 0.0,
             'suggestion': 'Pass',
             'raw_result': {},
@@ -167,17 +265,12 @@ class TencentIMSScanner:
             sub_label = resp.SubLabel if hasattr(resp, 'SubLabel') else ''
             if label and label != 'Normal':
                 result['violation_label'] = label
-                if label == 'Illegal':
-                    # Illegal 是大类，用 SubLabel 细分（如 Gamble→gambling）
-                    result['violation_type'] = self.ILLEGAL_SUBLABEL_MAP.get(
-                        sub_label, 'other'
-                    )
-                else:
-                    result['violation_type'] = self.VIOLATION_TYPE_MAP.get(label, 'other')
-
-            # 子标签作为描述（仅违规时有意义）
-            if sub_label:
-                result['violation_description'] = sub_label
+                result['violation_label_cn'] = self.LABEL_CN_MAP.get(label)
+                # violation_type 直接用 SubLabel；无 SubLabel 时退回用 Label
+                result['violation_type'] = sub_label if sub_label else label
+                if sub_label:
+                    result['sub_label'] = sub_label
+                    result['sub_label_cn'] = self.SUB_LABEL_CN_MAP.get(sub_label)
 
             # Score 是 0-100 整数，归一化到 0-1；仅违规时存置信度
             if result['is_violation'] and hasattr(resp, 'Score') and resp.Score is not None:
@@ -188,7 +281,6 @@ class TencentIMSScanner:
             
         except Exception as e:
             logger.error(f"解析IMS响应失败: {e}")
-            result['violation_description'] = f"解析错误: {str(e)}"
         
         return result
     

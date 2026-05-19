@@ -1,4 +1,4 @@
-# 🚀 快速开始（5 分钟）
+# 快速开始（5 分钟）
 
 **目标：** 第一次运行系统，看到实际效果
 
@@ -15,7 +15,7 @@
 
 ## 方案 A：本地运行（推荐快速试验）
 
-### 1️⃣ 安装依赖（3 分钟）
+### 1. 安装依赖（3 分钟）
 
 ```bash
 cd claude
@@ -26,7 +26,7 @@ source .venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 ```
 
-### 2️⃣ 配置环境（1 分钟）
+### 2. 配置环境（1 分钟）
 
 ```bash
 cp .env.example .env
@@ -49,13 +49,13 @@ TENCENT_SECRET_ID=your_secret_id        # 仅扫描器需要
 TENCENT_SECRET_KEY=your_secret_key      # 仅扫描器需要
 ```
 
-### 3️⃣ 初始化数据库（1 分钟）
+### 3. 初始化数据库（1 分钟）
 
 ```bash
 mysql -u root -p < schema.sql
 ```
 
-### 4️⃣ 运行扫描器（可选）
+### 4. 运行扫描器（可选）
 
 ```bash
 python scanner.py
@@ -65,31 +65,27 @@ python scanner.py
 ```
 [2026-05-19 10:00:00] | INFO | 扫描器初始化完成
 [2026-05-19 10:00:01] | INFO | 遍历完成，共 100 张图片
-[2026-05-19 10:00:10] | INFO | 扫描完成
-  - 总数：100
-  - 已扫描：95
-  - 复用结果：5
-  - 检出违规：3 张
+统计 - 总:100 | IMS扫描:95 | 路径复用:0 | 内容复用:3 | 特征复用:2 | 复用合计:5 | 违规:3 | 错误:0
 ```
 
-### 5️⃣ 运行处置工具
+### 5. 运行处置工具
 
 ```bash
 # 查看新增违规
 python handle_violations.py list
 
-# 标记为私密
-python handle_violations.py mark-private --type gambling --dry-run
+# 预演：标记赌博图片为私密
+python handle_violations.py mark-private --sub-label Gambling --dry-run
 
 # 实际执行
-python handle_violations.py mark-private --type gambling
+python handle_violations.py mark-private --sub-label Gambling
 ```
 
 ---
 
 ## 方案 B：Docker 运行（推荐生产）
 
-### 1️⃣ 配置环境（1 分钟）
+### 1. 配置环境（1 分钟）
 
 ```bash
 cd claude
@@ -97,32 +93,32 @@ cp .env.example .env
 # 编辑 .env
 ```
 
-### 2️⃣ 构建镜像（2 分钟）
+### 2. 构建镜像（2 分钟）
 
 ```bash
 docker-compose build
 ```
 
-### 3️⃣ 运行扫描
+### 3. 运行扫描
 
 ```bash
 docker-compose run --rm scanner python scanner.py
 ```
 
-### 4️⃣ 运行处置工具
+### 4. 运行处置工具
 
 ```bash
 docker-compose run --rm handler python handle_violations.py list
-docker-compose run --rm handler python handle_violations.py mark-private --type gambling
+docker-compose run --rm handler python handle_violations.py mark-private --sub-label Gambling
 ```
 
 ---
 
-## ✅ 验证成功
+## 验证成功
 
 如果你看到以下结果，说明配置正确：
 
-### ✓ 扫描器正常
+### 扫描器正常
 
 ```bash
 $ python scanner.py
@@ -131,7 +127,7 @@ $ python scanner.py
 [时间] | INFO | 扫描完成 ...
 ```
 
-### ✓ 处置工具正常
+### 处置工具正常
 
 ```bash
 $ python handle_violations.py list
@@ -139,7 +135,7 @@ $ python handle_violations.py list
 未处理的违规图片（blocked=0）（共 N 条）
 ```
 
-### ✓ 数据库正常
+### 数据库正常
 
 ```bash
 $ mysql image_security -e "SELECT COUNT(*) FROM image_scan_records"
@@ -150,7 +146,7 @@ $ mysql image_security -e "SELECT COUNT(*) FROM image_scan_records"
 
 ---
 
-## 🆘 常见问题（遇到问题？）
+## 常见问题（遇到问题？）
 
 | 问题 | 解决 |
 |------|------|
@@ -159,11 +155,9 @@ $ mysql image_security -e "SELECT COUNT(*) FROM image_scan_records"
 | `ModuleNotFoundError: No module named ...` | 运行 `pip install -r requirements.txt` |
 | `mkdir logs 权限被拒` | 运行 `chmod 777 logs` 或使用 `sudo` |
 
-**更多问题？** → 查看 [故障排查](./TROUBLESHOOTING.md)
-
 ---
 
-## 📚 下一步
+## 下一步
 
 - 想了解工作流？→ [三阶段工作流](./WORKFLOW.md)
 - 想深入使用？→ [使用指南](./USAGE.md)
@@ -171,7 +165,5 @@ $ mysql image_security -e "SELECT COUNT(*) FROM image_scan_records"
 - 想部署到生产？→ [生产部署](./PRODUCTION.md)
 
 ---
-
-**时间用完了吗？** 👏 恭喜，你已经了解了基本操作！
 
 详细的说明请参考完整文档：[文档导航](./INDEX.md)

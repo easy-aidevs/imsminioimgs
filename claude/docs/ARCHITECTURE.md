@@ -29,7 +29,7 @@ MinIO (隔离桶或原桶)
 
 **职责**：
 - 遍历 MinIO 桶中的所有图片
-- 对每张图片提取特征哈希（phash）
+- 对每张图片提取特征哈希（phash/dhash/ahash）
 - 调用腾讯云 IMS API 进行内容检测
 - 检测结果写入数据库
 
@@ -58,7 +58,7 @@ MinIO (隔离桶或原桶)
 ```
 输入: MinIO 对象 (bucket, key)
   ↓
-[特征提取] 提取 phash 特征
+[特征提取] 提取 pHash / dHash / aHash
   ↓
 [三层去重] 检查是否需要调用 IMS API
   1. 路径检查
@@ -66,14 +66,18 @@ MinIO (隔离桶或原桶)
   3. 相似检查（phash 距离）
   ↓
 [IMS 扫描] (可能跳过)
-  返回: is_violation, type, confidence
+  返回: is_violation, violation_label, sub_label, confidence
   ↓
 [数据库写入]
   image_scan_records 表
   - key: 内容哈希标识
   - feature_hash: phash
   - is_violation: 0/1
-  - violation_type: gambling/porn/...
+  - violation_type: SubLabel或Label直接值（如Gambling/SexyBehavior/Porn）
+  - violation_label: IMS 一级 Label（Polity/Porn/Sexy/Terror/Illegal/…）
+  - violation_label_cn: 一级 Label 中文名
+  - sub_label: IMS 二级 SubLabel（Gambling/SexyBehavior/…）
+  - sub_label_cn: 二级 SubLabel 中文名
   - blocked: 0=public, 1=private, 2=quarantined
   ↓
 [处置操作] (由 handle_violations.py 执行)
@@ -115,7 +119,9 @@ MinIO (隔离桶或原桶)
 - `bucket_name`, `object_key`：MinIO 位置
 - `feature_hash`：phash 特征，用于相似检测
 - `is_violation`：是否违规
-- `violation_type`：违规类型
+- `violation_type`：违规类型（直接取 SubLabel 或 Label 原始值）
+- `violation_label`, `violation_label_cn`：IMS 一级 Label 及中文名
+- `sub_label`, `sub_label_cn`：IMS 二级 SubLabel 及中文名
 - `blocked`：处置状态（0/1/2）
 - `content_type`：MIME 类型
 

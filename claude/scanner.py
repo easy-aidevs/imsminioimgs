@@ -185,36 +185,38 @@ class ImageSecurityScanner:
 
         处理三类问题：
           0. is_violation=0 但有 violation_type → 清除（Normal 图片被错误写入违规字段）
-          1. is_violation=1, matched_by=ims_api, violation_type=NULL → 从 raw_result 重新解析
-          2. is_violation=1, matched_by=content/similar, violation_type=NULL → 从来源记录复制
+          1. is_violation=1, matched_by=ims_api, violation_type=NULL/other → 从 raw_result 重新解析
+          2. is_violation=1, matched_by=content/similar, violation_type=NULL/other → 从来源记录复制
              （循环执行直到收敛，解决 A→B→C 多级链式依赖）
+        注：violation_type='other' 可能是旧版 VIOLATION_TYPE_MAP 映射错误导致，一并修复。
         """
-        vmap = self.ims.VIOLATION_TYPE_MAP
+        label_cn_map = self.ims.LABEL_CN_MAP
+        sublabel_cn_map = self.ims.SUB_LABEL_CN_MAP
 
         # 第 0 步：清理 is_violation=0 但被错误写入了违规字段的记录
         self.db.execute_query(
             "UPDATE image_scan_records "
             "SET violation_type=NULL, violation_label=NULL, "
-            "    violation_description=NULL, confidence=NULL, updated_at=NOW() "
+            "    sub_label=NULL, confidence=NULL, updated_at=NOW() "
             "WHERE is_violation=0 AND violation_type IS NOT NULL",
         )
 
         total = self.db.execute_query(
             "SELECT COUNT(*) AS c FROM image_scan_records "
-            "WHERE is_violation=1 AND violation_type IS NULL",
+            "WHERE is_violation=1 AND (violation_type IS NULL OR violation_type='other')",
             fetch=True,
         )[0]['c']
         if not total:
             return
 
-        logger.info(f"前置修复：发现 {total} 条 violation_type=NULL，开始修复...")
+        logger.info(f"前置修复：发现 {total} 条 violation_type=NULL/other，开始修复...")
 
         # 第 1 步：修复 ims_api 直接扫描记录（有 raw_result 可重新解析）
         n1 = 0
         rows = self.db.execute_query(
             """
             SELECT id, ims_result FROM image_scan_records
-            WHERE is_violation=1 AND violation_type IS NULL
+            WHERE is_violation=1 AND (violation_type IS NULL OR violation_type='other')
               AND ims_result IS NOT NULL
               AND JSON_UNQUOTE(JSON_EXTRACT(ims_result, '$.matched_by')) = 'ims_api'
             """,
@@ -234,22 +236,21 @@ class ImageSecurityScanner:
                 if not label or label == 'Normal':
                     continue
 
-                # Illegal 是大类，用 SubLabel 细分；其余直接查 VIOLATION_TYPE_MAP
-                illegal_map = self.ims.ILLEGAL_SUBLABEL_MAP
-                if label == 'Illegal':
-                    violation_type = illegal_map.get(sub_label, 'other')
-                else:
-                    violation_type = vmap.get(label, 'other')
+                # violation_type 直接用 SubLabel；无 SubLabel 时退回用 Label
+                violation_type = sub_label if sub_label else label
 
                 self.db.execute_query(
                     "UPDATE image_scan_records "
-                    "SET violation_type=%s, violation_label=%s, "
-                    "    violation_description=%s, confidence=%s, updated_at=NOW() "
+                    "SET violation_type=%s, violation_label=%s, violation_label_cn=%s, "
+                    "    sub_label=%s, sub_label_cn=%s, "
+                    "    confidence=%s, updated_at=NOW() "
                     "WHERE id=%s",
                     (
                         violation_type,
                         label,
+                        label_cn_map.get(label),
                         sub_label or None,
+                        sublabel_cn_map.get(sub_label) if sub_label else None,
                         round(score / 100.0, 4) if score is not None else None,
                         row['id'],
                     ),
@@ -260,12 +261,13 @@ class ImageSecurityScanner:
 
         # 第 2 步：修复 content/similar 复用记录，循环至收敛（处理多级链式依赖）
         # 例：A→B→C，第一轮修 C→B，第二轮再修 B→A
+        # Round 1 已修复所有 ims_api 来源，这里只需传播正确值即可
         n2 = 0
         for iteration in range(10):                     # 最多 10 轮，防止死循环
             rows = self.db.execute_query(
                 """
                 SELECT id, ims_result FROM image_scan_records
-                WHERE is_violation=1 AND violation_type IS NULL
+                WHERE is_violation=1 AND (violation_type IS NULL OR violation_type='other')
                   AND ims_result IS NOT NULL
                   AND JSON_UNQUOTE(JSON_EXTRACT(ims_result, '$.matched_by'))
                       IN ('content', 'similar')
@@ -286,9 +288,11 @@ class ImageSecurityScanner:
                     if not src_bucket or not src_key:
                         continue
 
+                    # 来源必须已有确定类型且不是 'other'（避免传播错误值）
+                    # 若来源本身就是正确的 'other'（如 Teenager），等 Round1 修它后再传播
                     sources = self.db.execute_query(
-                        "SELECT violation_type, violation_label, "
-                        "       violation_description, confidence "
+                        "SELECT violation_type, violation_label, violation_label_cn, "
+                        "       sub_label, sub_label_cn, confidence "
                         "FROM image_scan_records "
                         "WHERE bucket_name=%s AND object_key=%s "
                         "  AND violation_type IS NOT NULL LIMIT 1",
@@ -301,13 +305,16 @@ class ImageSecurityScanner:
                     src = sources[0]
                     self.db.execute_query(
                         "UPDATE image_scan_records "
-                        "SET violation_type=%s, violation_label=%s, "
-                        "    violation_description=%s, confidence=%s, updated_at=NOW() "
+                        "SET violation_type=%s, violation_label=%s, violation_label_cn=%s, "
+                        "    sub_label=%s, sub_label_cn=%s, "
+                        "    confidence=%s, updated_at=NOW() "
                         "WHERE id=%s",
                         (
                             src['violation_type'],
                             src['violation_label'],
-                            src['violation_description'],
+                            src.get('violation_label_cn'),
+                            src['sub_label'],
+                            src.get('sub_label_cn'),
                             src['confidence'],
                             row['id'],
                         ),
@@ -320,7 +327,7 @@ class ImageSecurityScanner:
             if fixed_this_round == 0:
                 break       # 本轮无进展，链式依赖已全部收敛
 
-        # 实际查库计算剩余（算术估算不准确）
+        # 剩余 IS NULL 的才是真正无法修复（'other' 可能是合法的 Teenager/Spam 分类）
         remaining = self.db.execute_query(
             "SELECT COUNT(*) AS c FROM image_scan_records "
             "WHERE is_violation=1 AND violation_type IS NULL",
@@ -328,11 +335,12 @@ class ImageSecurityScanner:
         )[0]['c']
 
         logger.info(
-            f"前置修复完成：ims_api={n1} content/similar={n2} 剩余无法修复={remaining}"
+            f"前置修复完成：ims_api={n1} content/similar={n2} 剩余无法修复(IS NULL)={remaining}"
         )
         if remaining:
             logger.warning(
-                f"  {remaining} 条记录缺少 raw_result 或来源已丢失，需重新扫描"
+                f"  {remaining} 条 is_violation=1 但 violation_type 仍为 NULL，"
+                f"可能缺少 raw_result 或来源已丢失，建议重新扫描"
             )
 
     # ------------------------------------------------------------------ 主循环
@@ -477,7 +485,9 @@ class ImageSecurityScanner:
             'is_violation': 1 if source.get('is_violation') else 0,
             'violation_type': source.get('violation_type'),
             'violation_label': source.get('violation_label'),
-            'violation_description': source.get('violation_description'),
+            'violation_label_cn': source.get('violation_label_cn'),
+            'sub_label': source.get('sub_label'),
+            'sub_label_cn': source.get('sub_label_cn'),
             'confidence': source.get('confidence'),
             'suggestion': source.get('suggestion'),
             'ims_result': {
@@ -499,7 +509,9 @@ class ImageSecurityScanner:
             'is_violation': 1 if ims_result['is_violation'] else 0,
             'violation_type': ims_result.get('violation_type'),
             'violation_label': ims_result.get('violation_label'),
-            'violation_description': ims_result.get('violation_description'),
+            'violation_label_cn': ims_result.get('violation_label_cn'),
+            'sub_label': ims_result.get('sub_label'),
+            'sub_label_cn': ims_result.get('sub_label_cn'),
             'confidence': ims_result.get('confidence'),
             'suggestion': ims_result.get('suggestion'),
             'ims_result': {

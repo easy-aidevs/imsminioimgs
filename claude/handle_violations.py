@@ -56,12 +56,21 @@ class ViolationHandler:
     # ------------------------------------------------------------------ 查询
 
     def list_violations(self, violation_type: str = None,
+                        sub_label: str = None,
+                        violation_label: str = None,
                         confidence: float = 0.0,
                         only_active: bool = True) -> List[Dict]:
-        """列出违规图片。only_active=True 只返回尚未处理的（blocked=0）。"""
+        """列出违规图片。only_active=True 只返回尚未处理的（blocked=0）。
+
+        violation_type:  SubLabel 值过滤（Gambling/SexyBehavior/…）；无 SubLabel 时为 Label 值
+        sub_label:       IMS 原始 SubLabel 过滤（Gambling/SexyBehavior/NationalOfficial/…）
+        violation_label: IMS 原始 Label 过滤（Illegal/Polity/Porn/Ad/…）
+        三个条件均为 AND 关系，可组合使用。
+        """
         query = """
             SELECT id, bucket_name, object_key, violation_type,
-                   violation_label, confidence, blocked
+                   violation_label, violation_label_cn, sub_label,
+                   sub_label_cn, confidence, blocked
             FROM image_scan_records
             WHERE is_violation = 1
         """
@@ -69,19 +78,29 @@ class ViolationHandler:
         if violation_type:
             query += " AND violation_type = %s"
             params.append(violation_type)
+        if sub_label:
+            query += " AND sub_label = %s"
+            params.append(sub_label)
+        if violation_label:
+            query += " AND violation_label = %s"
+            params.append(violation_label)
         if confidence > 0:
             query += " AND confidence >= %s"
             params.append(confidence)
         if only_active:
             query += " AND blocked = 0"
-        query += " ORDER BY violation_type, confidence DESC"
+        query += " ORDER BY violation_label, sub_label, confidence DESC"
         return self.db.execute_query(query, tuple(params), fetch=True)
 
     def list_private(self, violation_type: str = None,
+                     sub_label: str = None,
+                     violation_label: str = None,
                      confidence: float = 0.0, ids: List[int] = None) -> List[Dict]:
         """列出标记为 private 的图片（观察期）。blocked=1"""
         query = """
-            SELECT id, bucket_name, object_key, violation_type, confidence, blocked
+            SELECT id, bucket_name, object_key, violation_type,
+                   violation_label, violation_label_cn, sub_label,
+                   sub_label_cn, confidence, blocked
             FROM image_scan_records
             WHERE blocked = 1
         """
@@ -93,6 +112,12 @@ class ViolationHandler:
         if violation_type:
             query += " AND violation_type = %s"
             params.append(violation_type)
+        if sub_label:
+            query += " AND sub_label = %s"
+            params.append(sub_label)
+        if violation_label:
+            query += " AND violation_label = %s"
+            params.append(violation_label)
         if confidence > 0:
             query += " AND confidence >= %s"
             params.append(confidence)
@@ -104,7 +129,8 @@ class ViolationHandler:
         if ids:
             placeholders = ','.join(['%s'] * len(ids))
             query = f"""
-                SELECT id, bucket_name, object_key, violation_type, confidence, blocked
+                SELECT id, bucket_name, object_key, violation_type,
+                       violation_label_cn, sub_label_cn, confidence, blocked
                 FROM image_scan_records
                 WHERE blocked = 2 AND id IN ({placeholders})
             """
@@ -112,7 +138,8 @@ class ViolationHandler:
 
         return self.db.execute_query(
             """
-            SELECT id, bucket_name, object_key, violation_type, confidence, blocked
+            SELECT id, bucket_name, object_key, violation_type,
+                   violation_label_cn, sub_label_cn, confidence, blocked
             FROM image_scan_records
             WHERE blocked = 2
             ORDER BY updated_at DESC
@@ -301,18 +328,30 @@ class ViolationHandler:
         )
 
     def _restore_public(self, record_id: int):
-        """改回 public，视为误判（blocked=0, is_violation=0）"""
+        """改回 public，视为误判（blocked=0, is_violation=0，清除所有违规字段）。
+
+        同时清除 violation_* 字段，避免残留脏数据被列表查询误读。
+        scanner 启动时的 step-0 也会清理，但在此立即清理更安全。
+        """
         self.db.execute_query(
-            "UPDATE image_scan_records SET blocked = 0, is_violation = 0, "
-            "updated_at = NOW() WHERE id = %s",
+            "UPDATE image_scan_records "
+            "SET blocked = 0, is_violation = 0, "
+            "    violation_type = NULL, violation_label = NULL, "
+            "    sub_label = NULL, confidence = NULL, "
+            "    updated_at = NOW() "
+            "WHERE id = %s",
             (record_id,),
         )
 
     def _mark_restored(self, record_id: int):
-        """从隔离桶恢复，视为误判（blocked=0, is_violation=0）"""
+        """从隔离桶恢复，视为误判（blocked=0, is_violation=0，清除所有违规字段）。"""
         self.db.execute_query(
-            "UPDATE image_scan_records SET blocked = 0, is_violation = 0, "
-            "updated_at = NOW() WHERE id = %s",
+            "UPDATE image_scan_records "
+            "SET blocked = 0, is_violation = 0, "
+            "    violation_type = NULL, violation_label = NULL, "
+            "    sub_label = NULL, confidence = NULL, "
+            "    updated_at = NOW() "
+            "WHERE id = %s",
             (record_id,),
         )
 
@@ -327,12 +366,15 @@ def _print_records(records: List[Dict], title: str):
         print(f"\n{title}：无")
         return
     print(f"\n{title}（共 {len(records)} 条）")
-    print(f"{'ID':<6} {'类型':<12} {'置信度':<8} 路径")
-    print("-" * 80)
+    print(f"{'ID':<6} {'violation_type':<14} {'label':<12} {'label_cn':<10} {'sub_label_cn':<20} {'置信度':<8} 路径")
+    print("-" * 110)
     for r in records[:50]:
         conf = r.get('confidence') or 0
         vtype = r.get('violation_type') or '-'
-        print(f"{r['id']:<6} {vtype:<12} {conf:<8.2f} "
+        label = r.get('violation_label') or '-'
+        label_cn = r.get('violation_label_cn') or '-'
+        sub_cn = r.get('sub_label_cn') or r.get('sub_label') or '-'
+        print(f"{r['id']:<6} {vtype:<14} {label:<12} {label_cn:<10} {sub_cn:<20} {conf:<8.2f} "
               f"{r['bucket_name']}/{r['object_key']}")
     if len(records) > 50:
         print(f"... 还有 {len(records) - 50} 条未显示")
@@ -354,8 +396,11 @@ def main():
         epilog="""
 工作流示例：
   ============ 第一阶段：标记为私密（观察期）============
-  python handle_violations.py list                       # 查看新增违规
-  python handle_violations.py mark-private --type gambling     # 标记赌博类为私密
+  python handle_violations.py list                              # 查看新增违规
+  python handle_violations.py list --label Illegal             # 只看 Illegal 大类
+  python handle_violations.py list --sub-label Gambling        # 只看赌博 SubLabel
+  python handle_violations.py mark-private --sub-label Gambling  # 标记赌博为私密
+  python handle_violations.py mark-private --label Porn        # 标记整个色情大类
   python handle_violations.py list-private               # 查看观察中的图片
 
   ============ 第二阶段：确认后处理 ============
@@ -370,17 +415,23 @@ def main():
     sub = parser.add_subparsers(dest='command')
 
     p_list = sub.add_parser('list', help='列出未处理的违规图片（blocked=0）')
-    p_list.add_argument('--type', help='违规类型过滤')
+    p_list.add_argument('--type', dest='violation_type', help='violation_type 字段过滤（SubLabel 值，如 Gambling/SexyBehavior；无 SubLabel 时为 Label，如 Porn/Terror）')
+    p_list.add_argument('--sub-label', dest='sub_label', help='sub_label 字段过滤（IMS 原始 SubLabel，如 Gambling/SexyBehavior/NationalOfficial）')
+    p_list.add_argument('--label', dest='violation_label', help='violation_label 字段过滤（IMS 一级 Label，如 Illegal/Polity/Porn/Ad/Teenager）')
     p_list.add_argument('--confidence', type=float, default=0.0, help='置信度阈值')
 
     p_mark_private = sub.add_parser('mark-private', help='标记为私密（第一阶段）')
-    p_mark_private.add_argument('--type', help='违规类型过滤')
+    p_mark_private.add_argument('--type', dest='violation_type', help='violation_type 字段过滤')
+    p_mark_private.add_argument('--sub-label', dest='sub_label', help='sub_label 字段过滤（IMS 原始 SubLabel）')
+    p_mark_private.add_argument('--label', dest='violation_label', help='violation_label 字段过滤（IMS 一级 Label）')
     p_mark_private.add_argument('--confidence', type=float, default=0.0, help='置信度阈值')
     p_mark_private.add_argument('--ids', help='指定记录 ID，逗号分隔')
     p_mark_private.add_argument('--dry-run', action='store_true')
 
     p_list_private = sub.add_parser('list-private', help='列出私密观察中的图片（blocked=1）')
-    p_list_private.add_argument('--type', help='违规类型过滤')
+    p_list_private.add_argument('--type', dest='violation_type', help='violation_type 字段过滤')
+    p_list_private.add_argument('--sub-label', dest='sub_label', help='sub_label 字段过滤（IMS 原始 SubLabel）')
+    p_list_private.add_argument('--label', dest='violation_label', help='violation_label 字段过滤（IMS 一级 Label）')
     p_list_private.add_argument('--confidence', type=float, default=0.0, help='置信度阈值')
 
     p_confirm = sub.add_parser('confirm-quarantine', help='确认隔离（第二阶段-A：观察正常）')
@@ -405,20 +456,21 @@ def main():
     handler = ViolationHandler()
     try:
         if args.command == 'list':
-            records = handler.list_violations(args.type, args.confidence)
+            records = handler.list_violations(args.violation_type, args.sub_label, args.violation_label, args.confidence)
             _print_records(records, "未处理的违规图片（blocked=0）")
 
         elif args.command == 'mark-private':
             if args.ids:
                 placeholders = ','.join(['%s'] * len(_parse_ids(args.ids)))
                 records = handler.db.execute_query(
-                    f"SELECT id, bucket_name, object_key, violation_type, confidence "
+                    f"SELECT id, bucket_name, object_key, violation_type, "
+                    f"violation_label, sub_label, confidence "
                     f"FROM image_scan_records WHERE id IN ({placeholders}) AND blocked = 0",
                     tuple(_parse_ids(args.ids)),
                     fetch=True,
                 )
             else:
-                records = handler.list_violations(args.type, args.confidence)
+                records = handler.list_violations(args.violation_type, args.sub_label, args.violation_label, args.confidence)
 
             if not records:
                 print("没有符合条件的违规图片")
@@ -437,7 +489,7 @@ def main():
                   f"跳过: {stats['skipped']}")
 
         elif args.command == 'list-private':
-            records = handler.list_private(args.type, args.confidence)
+            records = handler.list_private(args.violation_type, args.sub_label, args.violation_label, args.confidence)
             _print_records(records, "私密观察中的图片（blocked=1）")
 
         elif args.command == 'confirm-quarantine':

@@ -12,14 +12,14 @@
 ## 快速开始
 
 ```bash
-# 1. 扫描图片（可选，需要腾讯云凭据）
+# 1. 扫描图片（需要腾讯云凭据）
 python scanner.py
 
 # 2. 查看新增违规
 python handle_violations.py list
 
 # 3. 标记为私密（第一阶段）
-python handle_violations.py mark-private --type gambling
+python handle_violations.py mark-private --sub-label Gambling
 
 # 4. 观察期后做决策
 python handle_violations.py confirm-quarantine --ids 1,2,3
@@ -32,16 +32,19 @@ python handle_violations.py restore-public --ids 4,5
 ### 基本用法
 
 ```bash
-python scanner.py [选项]
+python scanner.py
 ```
 
-### 主要选项
+Scanner.py 没有命令行参数，所有配置通过环境变量（`.env` 文件）控制。
 
-| 选项 | 说明 | 示例 |
-|------|------|------|
-| `--bucket` | 指定要扫描的桶（可多个） | `--bucket images --bucket photos` |
-| `--force-rescan` | 强制重新扫描已扫描的图片 | `--force-rescan` |
-| `--skip-ims` | 跳过 IMS 扫描（只做去重） | `--skip-ims` |
+### 环境变量
+
+| 环境变量 | 说明 | 示例 |
+|----------|------|------|
+| `SCAN_BUCKET_NAME` | 覆盖要扫描的桶名 | `SCAN_BUCKET_NAME=photos` |
+| `SCAN_PREFIX` | 路径前缀过滤（默认空） | `SCAN_PREFIX=uploads/` |
+| `FORCE_RESCAN=true` | 强制重新扫描所有图片 | `FORCE_RESCAN=true` |
+| `SCAN_LIMIT` | 限制扫描数量 | `SCAN_LIMIT=100` |
 
 ### 场景
 
@@ -62,22 +65,21 @@ python scanner.py
 
 **场景 3：强制重新扫描**
 ```bash
-python scanner.py --force-rescan
+FORCE_RESCAN=true python scanner.py
 ```
 - 忽略已有扫描记录
 - 重新扫描所有图片
 - 用于更新违规信息或调整阈值
 
+**场景 4：限量扫描（测试）**
+```bash
+SCAN_LIMIT=50 python scanner.py
+```
+
 ### 输出
 
 ```
-[2026-05-19 10:00:00] | INFO | 扫描器初始化完成
-[2026-05-19 10:00:01] | INFO | 遍历完成，共 100 张图片
-[2026-05-19 10:00:10] | INFO | 扫描完成
-  - 总数：100
-  - 已扫描：95
-  - 复用结果：5
-  - 检出违规：3 张
+统计 - 总:100 | IMS扫描:80 | 路径复用:10 | 内容复用:5 | 特征复用:5 | 复用合计:20 | 违规:3 | 错误:0
 ```
 
 ## Handle_violations.py（处置工具）
@@ -88,57 +90,76 @@ python scanner.py --force-rescan
 python handle_violations.py <command> [选项]
 ```
 
+### IMS 标签过滤
+
+所有列表和标记命令支持三种 IMS 标签维度过滤：
+
+| 选项 | 说明 | 示例 |
+|------|------|------|
+| `--label <Label>` | 按 IMS 一级 Label 过滤 | `--label Illegal` |
+| `--sub-label <SubLabel>` | 按 IMS 二级 SubLabel 精细过滤 | `--sub-label Gambling` |
+| `--type <type>` | 按 violation_type 过滤 | `--type Gambling` |
+| `--confidence <float>` | 按最低置信度过滤 | `--confidence 0.9` |
+
+**IMS 一级 Label 值**：`Polity`（政治）/ `Porn`（色情）/ `Sexy`（性感）/ `Terror`（暴恐）/ `Illegal`（违法）/ `Religion`（宗教识别）/ `Ad`（广告）/ `Teenager`（未成年识别）/ `Abuse`（谩骂）
+
+**常见 SubLabel 值**：`Gambling`（赌博）/ `SexyBehavior`（性行为）/ `NationalOfficial`（国家公职人员）/ `Drug`（毒品）/ `Blood`（血腥）/ `QrCode`（二维码）
+
 ### 命令列表
 
 #### 1. list - 查看新增违规
 
 ```bash
-python handle_violations.py list
+python handle_violations.py list [--type <type>] [--sub-label <sub_label>] [--label <label>] [--confidence <float>]
 ```
 
-输出：
+**输出示例**：
+
 ```
 未处理的违规图片（blocked=0）（共 3 条）
 
-ID  | 对象名                  | 类型    | 置信度 | 首次发现
-----|------------------------|--------|--------|----------
-1   | uploads/photo_1.jpg     | gambling| 0.95   | 2026-05-19
-2   | uploads/photo_2.jpg     | porn   | 0.89   | 2026-05-19
-3   | uploads/photo_3.jpg     | violence| 0.92   | 2026-05-19
+ID     violation_type    label        label_cn    sub_label_cn          置信度    路径
+1      Gambling          Illegal      违法         赌博                  0.95      images/uploads/photo_1.jpg
+2      SexyBehavior      Porn         色情         性行为                0.89      images/uploads/photo_2.jpg
+3      Blood             Terror       暴恐         血腥                  0.92      images/uploads/photo_3.jpg
+```
+
+**过滤示例**：
+```bash
+# 只查看赌博类违规
+python handle_violations.py list --sub-label Gambling
+
+# 查看所有违法内容（Illegal Label 下所有子类）
+python handle_violations.py list --label Illegal
+
+# 查看高置信度违规
+python handle_violations.py list --confidence 0.9
 ```
 
 #### 2. mark-private - 标记为私密（第一阶段）
 
 ```bash
-python handle_violations.py mark-private --type <type> [选项]
+python handle_violations.py mark-private [--type <type>] [--sub-label <sub_label>] [--label <label>] [--confidence <float>] [--ids <ids>] [--dry-run]
 ```
 
 **选项**：
-- `--type <type>`：违规类型（见下表）
-- `--ids <ids>`：指定 ID，如 `--ids 1,2,3`（不指定则处理该类型的所有）
+- `--sub-label <sub_label>`：按 IMS SubLabel 标记（推荐）
+- `--label <label>`：按 IMS 一级 Label 标记
+- `--type <type>`：按 violation_type 标记
+- `--confidence <float>`：按最低置信度过滤
+- `--ids <ids>`：指定 ID，如 `--ids 1,2,3`
 - `--dry-run`：预演，不实际执行
-
-**违规类型说明**：
-
-| 类型 | 中文含义 | 说明 | 优先级 |
-|------|---------|------|--------|
-| `gambling` | 赌博 | 赌场、赌博网站、赌博相关内容 | 🔴 高 |
-| `porn` | 色情 | 不雅、色情相关内容 | 🔴 高 |
-| `violence` | 暴力 | 暴力、血腥、残暴内容 | 🟠 中 |
-| `politics` | 政治 | 政治敏感内容 | 🟠 中 |
-| `terrorism` | 恐怖 | 恐怖主义相关内容 | 🔴 高 |
-| `ads` | 广告 | 虚假或骚扰广告 | 🟡 低 |
-| `contraband` | 违禁品 | 毒品、枪支等违禁品 | 🔴 高 |
-| `vulgar` | 低俗 | 低俗、不适当语言或手势 | 🟡 低 |
-| `qrcode` | 二维码 | 未知/可疑二维码 | 🟡 低 |
 
 **示例**：
 ```bash
-# 查看将要标记的赌博图片
-python handle_violations.py mark-private --type gambling --dry-run
+# 预演：查看将要标记的赌博图片
+python handle_violations.py mark-private --sub-label Gambling --dry-run
 
 # 实际标记所有赌博图片为私密
-python handle_violations.py mark-private --type gambling
+python handle_violations.py mark-private --sub-label Gambling
+
+# 标记所有违法内容
+python handle_violations.py mark-private --label Illegal
 
 # 标记指定 ID 为私密
 python handle_violations.py mark-private --ids 1,2,3
@@ -152,23 +173,24 @@ python handle_violations.py mark-private --ids 1,2,3
 #### 3. list-private - 查看观察中的图片
 
 ```bash
-python handle_violations.py list-private
+python handle_violations.py list-private [--type <type>] [--sub-label <sub_label>] [--label <label>] [--confidence <float>]
 ```
 
-输出观察期内（blocked=1）的所有图片。
+输出观察期内（blocked=1）的图片，支持同样的过滤选项。
 
 #### 4. confirm-quarantine - 确认隔离（第二阶段）
 
 ```bash
-python handle_violations.py confirm-quarantine --ids <ids>
+python handle_violations.py confirm-quarantine --ids <ids> [--dry-run]
 ```
 
 **选项**：
-- `--ids <ids>`：要隔离的图片 ID，必需
+- `--ids <ids>`：要隔离的图片 ID，**必需**
+- `--dry-run`：预演
 
 **示例**：
 ```bash
-# 隔离 ID 为 1, 2, 3 的图片
+python handle_violations.py confirm-quarantine --ids 1,2,3 --dry-run
 python handle_violations.py confirm-quarantine --ids 1,2,3
 ```
 
@@ -180,15 +202,11 @@ python handle_violations.py confirm-quarantine --ids 1,2,3
 #### 5. restore-public - 恢复为公开（第二阶段）
 
 ```bash
-python handle_violations.py restore-public --ids <ids>
+python handle_violations.py restore-public --ids <ids> [--dry-run]
 ```
-
-**选项**：
-- `--ids <ids>`：要恢复的图片 ID，必需
 
 **示例**：
 ```bash
-# 恢复 ID 为 4, 5 的图片为公开
 python handle_violations.py restore-public --ids 4,5
 ```
 
@@ -203,24 +221,26 @@ python handle_violations.py restore-public --ids 4,5
 python handle_violations.py list-quarantined
 ```
 
-输出所有已隔离（blocked=2）的图片。
+输出所有已隔离（blocked=2）的图片，无过滤选项。
 
 #### 7. delete - 彻底删除（第三阶段）
 
 ```bash
-python handle_violations.py delete --ids <ids>
+python handle_violations.py delete --ids <ids> [--dry-run]
 ```
 
 **选项**：
-- `--ids <ids>`：要删除的图片 ID，必需
+- `--ids <ids>`：要删除的图片 ID，**必需**
 - `--dry-run`：预演，不实际执行
+
+**重要**：实际删除时需在终端输入 `DELETE` 进行确认，而非 y/n。
 
 **示例**：
 ```bash
 # 预演删除
 python handle_violations.py delete --ids 1,2,3 --dry-run
 
-# 实际删除
+# 实际删除（会提示输入 DELETE 确认）
 python handle_violations.py delete --ids 1,2,3
 ```
 
@@ -237,17 +257,18 @@ python handle_violations.py delete --ids 1,2,3
 # 1. 查看新增违规
 $ python handle_violations.py list
 未处理的违规图片（共 3 条）
-ID | 对象名 | 类型 | 置信度
-1 | photo_1.jpg | gambling | 0.95
-2 | photo_2.jpg | porn | 0.89
-3 | photo_3.jpg | violence | 0.92
+ID     violation_type    label     label_cn  sub_label_cn  置信度  路径
+1      Gambling          Illegal   违法       赌博          0.95    images/photo_1.jpg
+2      SexyBehavior      Porn      色情       性行为        0.89    images/photo_2.jpg
+3      Blood             Terror    暴恐       血腥          0.92    images/photo_3.jpg
 
 # 2. 标记赌博图片为私密
-$ python handle_violations.py mark-private --type gambling
-✓ 已标记 ID 1 为私密 (photo_1.jpg)
-✓ 已标记 ID 3 为私密 (photo_3.jpg)
+$ python handle_violations.py mark-private --sub-label Gambling
 
-# 3. 监控业务日志，观察是否有报错
+# 3. 标记其他违规
+$ python handle_violations.py mark-private --ids 2,3
+
+# 4. 监控业务日志，观察是否有报错
 [观察期内：24-48 小时]
 ```
 
@@ -256,20 +277,13 @@ $ python handle_violations.py mark-private --type gambling
 ```bash
 # 1. 查看观察中的图片
 $ python handle_violations.py list-private
-观察中的违规（共 2 条）
-ID | 对象名 | 类型 | 标记时间
-1 | photo_1.jpg | gambling | 2026-05-19 10:00
-3 | photo_3.jpg | violence | 2026-05-19 10:10
 
 # 2. 根据业务日志和反馈决策：
 #    - ID 1（赌博）：日志正常 → 确认隔离
-#    - ID 3（暴力）：有用户投诉 → 恢复公开
+#    - ID 3（血腥）：有用户投诉 → 恢复公开
 
-$ python handle_violations.py confirm-quarantine --ids 1
-✓ 已隔离 ID 1
-
+$ python handle_violations.py confirm-quarantine --ids 1,2
 $ python handle_violations.py restore-public --ids 3
-✓ 已恢复 ID 3 为公开
 ```
 
 ### 第三天：彻底删除
@@ -277,13 +291,10 @@ $ python handle_violations.py restore-public --ids 3
 ```bash
 # 1. 查看已隔离的图片
 $ python handle_violations.py list-quarantined
-已隔离的违规（共 1 条）
-ID | 对象名 | 类型 | 隔离时间
-1 | photo_1.jpg | gambling | 2026-05-19 11:00
 
 # 2. 删除已隔离的图片
-$ python handle_violations.py delete --ids 1
-✓ 已删除 ID 1 (photo_1.jpg)
+$ python handle_violations.py delete --ids 1,2
+请输入 DELETE 确认删除：DELETE
 ```
 
 ## 日志查看

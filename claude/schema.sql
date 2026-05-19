@@ -21,9 +21,11 @@ CREATE TABLE IF NOT EXISTS image_scan_records (
     
     -- 扫描结果
     is_violation TINYINT(1) DEFAULT 0 COMMENT '是否违规: 0-否, 1-是',
-    violation_type VARCHAR(255) DEFAULT NULL COMMENT '违规类型: gambling(赌博)/porn(色情)/violence(暴力)/politics(政治)/ads(广告)/terrorism(恐怖主义)/contraband(违禁品)/vulgar(低俗)/other(其他)',
-    violation_label VARCHAR(255) DEFAULT NULL COMMENT '违规标签: 具体细分类型',
-    violation_description TEXT DEFAULT NULL COMMENT '违规描述: 详细说明',
+    violation_type VARCHAR(255) DEFAULT NULL COMMENT '违规类型：直接取 IMS SubLabel（如 Gambling/SexyBehavior/NationalOfficial），无 SubLabel 时取 Label（如 Porn/Terror/Polity）',
+    violation_label VARCHAR(128) DEFAULT NULL COMMENT '腾讯IMS一级标签(Label): Polity/Porn/Sexy/Terror/Illegal/Ad/Teenager/Abuse/...',
+    violation_label_cn VARCHAR(64) DEFAULT NULL COMMENT '一级标签中文名: 政治/色情/性感/暴恐/违法/广告/未成年识别/...',
+    sub_label VARCHAR(128) DEFAULT NULL COMMENT '腾讯IMS二级标签(SubLabel): NationalOfficial/Gambling/SexyBehavior/...',
+    sub_label_cn VARCHAR(128) DEFAULT NULL COMMENT '二级标签中文名: 国部级领导人/赌博/性行为画面/...',
     confidence DECIMAL(5,4) DEFAULT NULL COMMENT '置信度: 0.0000-1.0000',
     suggestion VARCHAR(50) DEFAULT NULL COMMENT '建议操作: Block(屏蔽)/Review(人工审核)/Pass(通过)',
     

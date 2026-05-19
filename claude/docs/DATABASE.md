@@ -26,22 +26,28 @@ SOURCE schema.sql;
 | 字段 | 类型 | NULL | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `id` | BIGINT | NO | 自增 | 主键，自增 ID |
-| `key` | VARCHAR(128) | NO | - | 内容唯一标识：MD5(内容) - 文件大小，用于去重 |
+| `key` | VARCHAR(128) | NO | - | 内容唯一标识：MD5(内容)-文件大小，用于内容去重 |
+| `feature_hash` | VARCHAR(64) | YES | NULL | 主感知哈希（pHash），用于相似检测 |
+| `feature_hash_dhash` | VARCHAR(64) | YES | NULL | dHash |
+| `feature_hash_ahash` | VARCHAR(64) | YES | NULL | aHash |
+| `feature_hash_phash` | VARCHAR(64) | YES | NULL | pHash（冗余存储） |
 | `bucket_name` | VARCHAR(255) | NO | - | MinIO 桶名 |
 | `object_key` | VARCHAR(512) | NO | - | MinIO 对象键（路径） |
-| `content_type` | VARCHAR(128) | YES | NULL | MIME 类型（如 image/jpeg） |
 | `file_size` | BIGINT | YES | NULL | 文件大小（字节） |
-| `feature_hash` | VARCHAR(64) | YES | NULL | 感知哈希（phash），用于相似检测 |
+| `content_type` | VARCHAR(128) | YES | NULL | MIME 类型（如 image/jpeg） |
 | `is_violation` | TINYINT | NO | 0 | 是否违规：0=否，1=是 |
-| `violation_type` | VARCHAR(50) | YES | NULL | 违规类型：gambling/porn/violence/politics/terrorism/ads/contraband/vulgar/qrcode |
-| `violation_label` | VARCHAR(100) | YES | NULL | 违规细分标签 |
-| `confidence` | DECIMAL(5,4) | YES | 0.0000 | 置信度：0.0000-1.0000（由腾讯云 IMS 返回） |
-| `suggestion` | VARCHAR(20) | YES | NULL | IMS 建议：review/block 等 |
-| `blocked` | TINYINT | NO | 0 | **处置状态**：0=public，1=private，2=quarantined |
+| `violation_type` | VARCHAR(50) | YES | NULL | 直接取 IMS SubLabel（如 Gambling/SexyBehavior），无 SubLabel 时取 Label（如 Porn/Terror） |
+| `violation_label` | VARCHAR(50) | YES | NULL | IMS 一级 Label：Polity/Porn/Sexy/Terror/Illegal/Religion/Ad/Teenager/Abuse |
+| `violation_label_cn` | VARCHAR(50) | YES | NULL | 一级 Label 中文名（政治/色情/性感/暴恐/违法/宗教识别/广告/未成年识别/谩骂） |
+| `sub_label` | VARCHAR(100) | YES | NULL | IMS 二级 SubLabel：Gambling/SexyBehavior/NationalOfficial/Drug/Blood/QrCode/… |
+| `sub_label_cn` | VARCHAR(100) | YES | NULL | 二级 SubLabel 中文名 |
+| `confidence` | DECIMAL(5,4) | YES | 0.0000 | 置信度：0.0000–1.0000（由腾讯云 IMS Score/100 换算） |
+| `suggestion` | VARCHAR(20) | YES | NULL | IMS 建议：Block/Review/Pass |
+| `ims_result` | JSON | YES | NULL | 完整扫描结果（含 raw_result 和 request_id） |
+| `ims_request_id` | VARCHAR(128) | YES | NULL | 腾讯云 IMS 请求 ID |
 | `scan_status` | VARCHAR(20) | NO | pending | 扫描状态：pending/scanning/completed/failed |
-| `ims_result` | JSON | YES | NULL | 腾讯云 IMS 原始返回结果（完整 JSON） |
 | `error_message` | TEXT | YES | NULL | 扫描失败时的错误信息 |
-| `error_retry_count` | INT | NO | 0 | 失败重试次数 |
+| `blocked` | TINYINT | NO | 0 | **处置状态**：0=public，1=private，2=quarantined |
 | `first_seen_at` | DATETIME | YES | 当前时间 | 图片首次发现时间 |
 | `last_scanned_at` | DATETIME | YES | NULL | 最后一次扫描时间 |
 | `created_at` | DATETIME | NO | 当前时间 | 记录创建时间 |
@@ -90,7 +96,7 @@ INDEX idx_created_at (created_at)
 
 ### feature_hash 字段（感知哈希）
 
-**类型**：phash（知觉哈希）
+**类型**：pHash（知觉哈希，主字段）
 
 **用途**：
 - 相似图片检测（第 3 层去重）
@@ -101,6 +107,30 @@ INDEX idx_created_at (created_at)
 原图：photo_1.jpg → phash = "8f4a5e2c1b9d7f3a"
 类似：photo_2.jpg → phash = "8f4a5e2c1b9d7f3c"（仅1位不同）
 距离 = 1，认为相似，复用原图的扫描结果
+```
+
+### violation_type / violation_label / sub_label 字段
+
+这三个字段共同描述 IMS 的检测结果：
+
+| 字段 | 来源 | 示例值 |
+|------|------|-------|
+| `violation_label` | IMS 一级 Label | `Illegal` |
+| `violation_label_cn` | 中文名 | `违法` |
+| `sub_label` | IMS 二级 SubLabel | `Gambling` |
+| `sub_label_cn` | 中文名 | `赌博` |
+| `violation_type` | sub_label（有则取），否则取 violation_label | `Gambling` |
+
+**过滤查询示例**：
+```sql
+-- 按一级 Label 查（查所有"违法"内容，含赌博/毒品等）
+SELECT * FROM image_scan_records WHERE violation_label = 'Illegal';
+
+-- 按二级 SubLabel 查（精确到赌博）
+SELECT * FROM image_scan_records WHERE sub_label = 'Gambling';
+
+-- 按 violation_type 查（等同于 sub_label 有值时）
+SELECT * FROM image_scan_records WHERE violation_type = 'Gambling';
 ```
 
 ### blocked 字段（处置状态）
@@ -143,23 +173,22 @@ INDEX idx_created_at (created_at)
 
 ### ims_result 字段
 
-**内容**：腾讯云 IMS API 的完整返回结果（JSON 格式）
+**内容**：扫描完整结果（JSON 格式）
 
 **示例**：
 ```json
 {
-  "code": 0,
-  "msg": "ok",
-  "data": {
-    "suggestion": "block",
-    "label": 10,
-    "confidence": 95,
-    "details": {
-      "porn": { "confidence": 5 },
-      "gambling": { "confidence": 95 },
-      "violence": { "confidence": 10 }
-    }
-  }
+  "matched_by": "ims_api",
+  "raw_result": {
+    "Suggestion": "Block",
+    "Label": "Illegal",
+    "SubLabel": "Gambling",
+    "Score": 95,
+    "LabelResults": [...],
+    "ObjectResults": [...],
+    "OcrResults": [...]
+  },
+  "request_id": "abc123xyz"
 }
 ```
 
@@ -168,7 +197,7 @@ INDEX idx_created_at (created_at)
 ### 查看新增违规
 
 ```sql
-SELECT id, object_key, violation_type, confidence, created_at
+SELECT id, object_key, violation_type, violation_label, sub_label, confidence, created_at
 FROM image_scan_records
 WHERE is_violation = 1 AND blocked = 0
 ORDER BY created_at DESC;
@@ -177,7 +206,7 @@ ORDER BY created_at DESC;
 ### 查看观察中的图片
 
 ```sql
-SELECT id, object_key, violation_type, created_at
+SELECT id, object_key, violation_type, violation_label, sub_label_cn, created_at
 FROM image_scan_records
 WHERE blocked = 1
 ORDER BY created_at ASC;
@@ -186,7 +215,7 @@ ORDER BY created_at ASC;
 ### 查看已隔离的图片
 
 ```sql
-SELECT id, object_key, violation_type, created_at
+SELECT id, object_key, violation_type, violation_label, sub_label, created_at
 FROM image_scan_records
 WHERE blocked = 2
 ORDER BY created_at DESC;
@@ -206,10 +235,10 @@ ORDER BY distance;
 ### 统计违规类型
 
 ```sql
-SELECT violation_type, COUNT(*) as count, AVG(confidence) as avg_confidence
+SELECT violation_label, sub_label, COUNT(*) as count, AVG(confidence) as avg_confidence
 FROM image_scan_records
 WHERE is_violation = 1 AND blocked IN (0, 1)
-GROUP BY violation_type
+GROUP BY violation_label, sub_label
 ORDER BY count DESC;
 ```
 

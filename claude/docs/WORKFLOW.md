@@ -10,7 +10,7 @@
 扫描器发现违规 (is_violation=1)
         ↓
 ╔═══════════════════════════════════════════════════╗
-║ 🔸 第一阶段：发现 & 标记私密                        ║
+║ 第一阶段：发现 & 标记私密                           ║
 ║   (原桶，隐藏观察，可随时恢复)                      ║
 ╚═══════════════════════════════════════════════════╝
         ↓
@@ -19,8 +19,8 @@
         ↓
     ┌─────────┬──────────┐
     ↓         ↓          ↓
-║════════════════════════════════════════════════════╗║
-║ 🟡 第二阶段：观察决策                                ║
+╔════════════════════════════════════════════════════╗
+║ 第二阶段：观察决策                                   ║
 ║   基于监控结果，确认隔离或恢复                        ║
 ╚════════════════════════════════════════════════════╝
     ↓              ↓
@@ -30,7 +30,7 @@ blocked=2      blocked=0
 (移到隔离桶)    (视为误判)
     ↓              ↓
 ╔═══════════════════════════════════════════════════╗
-║ 🔴 第三阶段：彻底删除(仅限隔离状态)                 ║
+║ 第三阶段：彻底删除(仅限隔离状态)                    ║
 ║   已隔离的图片，确认删除后彻底移除                   ║
 ╚═══════════════════════════════════════════════════╝
     ↓
@@ -65,11 +65,23 @@ python handle_violations.py list
 ```
 未处理的违规图片（共 3 条）
 
-ID  | 对象名                  | 类型      | 置信度 | 首次发现
-----|------------------------|----------|--------|----------
-1   | uploads/photo_1.jpg     | gambling  | 0.95   | 2026-05-19
-2   | uploads/photo_2.jpg     | porn      | 0.89   | 2026-05-19
-3   | uploads/photo_3.jpg     | violence  | 0.92   | 2026-05-19
+ID     violation_type    label        label_cn    sub_label_cn          置信度    路径
+1      Gambling          Illegal      违法         赌博                  0.95      images/uploads/photo_1.jpg
+2      SexyBehavior      Porn         色情         性行为                0.89      images/uploads/photo_2.jpg
+3      Blood             Terror       暴恐         血腥                  0.92      images/uploads/photo_3.jpg
+```
+
+可以按标签过滤：
+
+```bash
+# 只看赌博类
+python handle_violations.py list --sub-label Gambling
+
+# 只看违法内容（Illegal Label）
+python handle_violations.py list --label Illegal
+
+# 只看色情
+python handle_violations.py list --label Porn
 ```
 
 #### 2. 标记为私密
@@ -77,14 +89,17 @@ ID  | 对象名                  | 类型      | 置信度 | 首次发现
 根据违规类型或指定 ID 标记为私密：
 
 ```bash
-# 方法 1：按类型标记（如赌博）
-python handle_violations.py mark-private --type gambling
+# 方法 1：按 SubLabel 标记（推荐，精细）
+python handle_violations.py mark-private --sub-label Gambling
 
-# 方法 2：指定 ID 标记
+# 方法 2：按 Label 标记（包含该 Label 下所有子类）
+python handle_violations.py mark-private --label Illegal
+
+# 方法 3：指定 ID 标记
 python handle_violations.py mark-private --ids 2,3
 
-# 方法 3：预演（不实际执行）
-python handle_violations.py mark-private --type gambling --dry-run
+# 方法 4：预演（不实际执行）
+python handle_violations.py mark-private --sub-label Gambling --dry-run
 ```
 
 执行后：
@@ -103,11 +118,10 @@ python handle_violations.py list-private
 ```
 观察中的违规（共 3 条）
 
-ID  | 对象名                  | 类型      | 标记时间
-----|------------------------|----------|----------
-1   | uploads/photo_1.jpg     | gambling  | 2026-05-19 10:00
-2   | uploads/photo_2.jpg     | porn      | 2026-05-19 10:05
-3   | uploads/photo_3.jpg     | violence  | 2026-05-19 10:10
+ID     violation_type    label        label_cn    sub_label_cn          置信度    路径
+1      Gambling          Illegal      违法         赌博                  0.95      images/uploads/photo_1.jpg
+2      SexyBehavior      Porn         色情         性行为                0.89      images/uploads/photo_2.jpg
+3      Blood             Terror       暴恐         血腥                  0.92      images/uploads/photo_3.jpg
 ```
 
 ### 观察期内的操作
@@ -118,10 +132,10 @@ ID  | 对象名                  | 类型      | 标记时间
 3. **第 3 步**：确认观察结果（24-48 小时后）
 
 **监控要点**：
-- ✓ 标记后应用是否报错（如 404 错误过多）
-- ✓ 业务日志是否有异常访问请求
-- ✓ 用户反馈是否有申诉恢复的请求
-- ✓ 数据一致性是否受影响
+- 标记后应用是否报错（如 404 错误过多）
+- 业务日志是否有异常访问请求
+- 用户反馈是否有申诉恢复的请求
+- 数据一致性是否受影响
 
 ## 第二阶段：观察决策
 
@@ -133,9 +147,9 @@ ID  | 对象名                  | 类型      | 标记时间
 #### 情景 A：观察正常 → 确认隔离
 
 **条件**：
-- ✓ 24-48 小时内无应用异常
-- ✓ 无业务日志报错
-- ✓ 确信图片违规
+- 24-48 小时内无应用异常
+- 无业务日志报错
+- 确信图片违规
 
 **执行**：
 ```bash
@@ -150,9 +164,9 @@ python handle_violations.py confirm-quarantine --ids 1,3
 #### 情景 B：观察异常 → 恢复公开
 
 **条件**：
-- ✗ 标记后出现异常（应用报错、用户投诉等）
-- ✗ 判断为误判
-- ✗ 需要保留图片
+- 标记后出现异常（应用报错、用户投诉等）
+- 判断为误判
+- 需要保留图片
 
 **执行**：
 ```bash
@@ -187,24 +201,12 @@ python handle_violations.py restore-public --ids 2
 
 ```bash
 python handle_violations.py confirm-quarantine --ids 1
-
-输出：
-✓ 已隔离 ID 1 (uploads/photo_1.jpg)
-  - 从 'images' 移到 'quarantine' 桶
-  - 数据库更新 blocked=2
-  - 此后仅能删除，不可恢复
 ```
 
 #### 3. 恢复公开（可逆）
 
 ```bash
 python handle_violations.py restore-public --ids 2
-
-输出：
-✓ 已恢复 ID 2 为公开 (uploads/photo_2.jpg)
-  - 权限改回公开
-  - 数据库更新 blocked=0
-  - 视为误判，图片可再次访问
 ```
 
 ### 查看隔离中的图片
@@ -218,9 +220,8 @@ python handle_violations.py list-quarantined
 ```
 已隔离的违规（共 1 条）
 
-ID  | 对象名                  | 类型      | 隔离时间
-----|------------------------|----------|----------
-1   | uploads/photo_1.jpg     | gambling  | 2026-05-20 12:00
+ID     violation_type    label        label_cn    sub_label_cn          置信度    路径
+1      Gambling          Illegal      违法         赌博                  0.95      quarantine/photo_1.jpg
 ```
 
 ## 第三阶段：彻底删除
@@ -238,22 +239,15 @@ ID  | 对象名                  | 类型      | 隔离时间
 
 ```bash
 python handle_violations.py delete --ids 1 --dry-run
-
-输出：
-[预演] 将删除以下图片：
-  - ID 1: uploads/photo_1.jpg (gambling, 隔离于 2026-05-20 12:00)
 ```
 
 #### 2. 实际删除
 
+执行时需要在终端输入 `DELETE` 进行确认：
+
 ```bash
 python handle_violations.py delete --ids 1
-
-输出：
-✓ 已删除 ID 1 (uploads/photo_1.jpg)
-  - 从隔离桶 'quarantine' 永久删除
-  - 数据库记录移除
-  - 不可恢复
+请输入 DELETE 确认删除：DELETE
 ```
 
 ### 批量删除
@@ -261,9 +255,6 @@ python handle_violations.py delete --ids 1
 ```bash
 # 删除多张图片
 python handle_violations.py delete --ids 1,3,5
-
-# 删除一个时间范围内的图片（需在代码中实现）
-# python handle_violations.py delete --before 2026-05-15
 ```
 
 ## 完整示例：3 天处理流程
@@ -273,27 +264,20 @@ python handle_violations.py delete --ids 1,3,5
 ```bash
 # 09:00 - 扫描新增图片
 $ python scanner.py
-[INFO] 扫描完成
-  - 总数：50
-  - 已扫描：45
-  - 检出违规：3 张
 
 # 10:00 - 查看违规
 $ python handle_violations.py list
 未处理的违规图片（共 3 条）
-ID | 对象名 | 类型 | 置信度
-1 | photo_1.jpg | gambling | 0.95
-2 | photo_2.jpg | porn | 0.89
-3 | photo_3.jpg | violence | 0.92
+ID     violation_type    label     label_cn  sub_label_cn  置信度  路径
+1      Gambling          Illegal   违法       赌博          0.95    images/photo_1.jpg
+2      SexyBehavior      Porn      色情       性行为        0.89    images/photo_2.jpg
+3      Blood             Terror    暴恐       血腥          0.92    images/photo_3.jpg
 
 # 10:30 - 标记赌博图片为私密
-$ python handle_violations.py mark-private --type gambling
-✓ 已标记 ID 1 为私密
+$ python handle_violations.py mark-private --sub-label Gambling
 
 # 11:00 - 标记其他违规为私密
 $ python handle_violations.py mark-private --ids 2,3
-✓ 已标记 ID 2 为私密
-✓ 已标记 ID 3 为私密
 
 # 17:00 - 监控：确认应用日志正常
 [应用日志] 正常，无 404 或其他错误
@@ -305,25 +289,17 @@ $ python handle_violations.py mark-private --ids 2,3
 ```bash
 # 09:00 - 查看观察中的图片
 $ python handle_violations.py list-private
-观察中的违规（共 3 条）
-ID | 对象名 | 类型 | 标记时间
-1 | photo_1.jpg | gambling | 2026-05-19 10:30
-2 | photo_2.jpg | porn | 2026-05-19 11:00
-3 | photo_3.jpg | violence | 2026-05-19 11:00
 
 # 12:00 - 监控 24 小时：
 #   - ID 1（赌博）：日志正常，无异常 ✓
-#   - ID 2（色情）：日志正常，无异常 ✓
-#   - ID 3（暴力）：有 1 个用户投诉，可能误判 ✗
+#   - ID 2（性行为）：日志正常，无异常 ✓
+#   - ID 3（血腥）：有 1 个用户投诉，可能误判 ✗
 
 # 14:00 - 确认隔离 ID 1 和 2
 $ python handle_violations.py confirm-quarantine --ids 1,2
-✓ 已隔离 ID 1
-✓ 已隔离 ID 2
 
 # 15:00 - 恢复 ID 3（误判）
 $ python handle_violations.py restore-public --ids 3
-✓ 已恢复 ID 3 为公开
 ```
 
 ### 第三天（删除）
@@ -331,21 +307,13 @@ $ python handle_violations.py restore-public --ids 3
 ```bash
 # 09:00 - 查看已隔离的图片
 $ python handle_violations.py list-quarantined
-已隔离的违规（共 2 条）
-ID | 对象名 | 类型 | 隔离时间
-1 | photo_1.jpg | gambling | 2026-05-20 14:00
-2 | photo_2.jpg | porn | 2026-05-20 14:00
 
-# 10:00 - 再次确认隔离内容，然后删除
+# 10:00 - 预演
 $ python handle_violations.py delete --ids 1,2 --dry-run
-[预演] 将删除：
-  - ID 1: photo_1.jpg (gambling)
-  - ID 2: photo_2.jpg (porn)
 
 # 11:00 - 实际删除
 $ python handle_violations.py delete --ids 1,2
-✓ 已删除 ID 1
-✓ 已删除 ID 2
+请输入 DELETE 确认删除：DELETE
 ```
 
 ## 关键设计原则
