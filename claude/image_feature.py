@@ -58,7 +58,9 @@ class ImageFeatureExtractor:
             # 将二进制数据转换为PIL Image对象
             image = Image.open(io.BytesIO(image_data))
             
-            # 转换为RGB模式（处理RGBA、灰度图等）
+            # P 模式（调色板）带透明度时须先转 RGBA 再转 RGB，否则 Pillow 会警告
+            if image.mode == 'P' and 'transparency' in image.info:
+                image = image.convert('RGBA')
             if image.mode != 'RGB':
                 image = image.convert('RGB')
             

@@ -141,52 +141,24 @@ class TencentIMSScanner:
             # 获取建议操作
             if hasattr(resp, 'Suggestion'):
                 result['suggestion'] = resp.Suggestion
-            
+
             # 判断是否违规
             if result['suggestion'] in ['Block', 'Review']:
                 result['is_violation'] = True
-            
-            # 解析标签信息
+
+            # resp.Label 是字符串（如 "Porn"），不是对象
             if hasattr(resp, 'Label') and resp.Label:
-                label_info = resp.Label
-                
-                # 主要标签
-                if hasattr(label_info, 'Label'):
-                    main_label = label_info.Label
-                    result['violation_label'] = main_label
-                    
-                    # 映射违规类型
-                    if main_label in self.VIOLATION_TYPE_MAP:
-                        result['violation_type'] = self.VIOLATION_TYPE_MAP[main_label]
-                    else:
-                        result['violation_type'] = 'other'
-                
-                # 子标签详情
-                if hasattr(label_info, 'SubLabels') and label_info.SubLabels:
-                    sub_labels = []
-                    descriptions = []
-                    max_confidence = 0.0
+                result['violation_label'] = resp.Label
+                result['violation_type'] = self.VIOLATION_TYPE_MAP.get(resp.Label, 'other')
 
-                    for sub_label in label_info.SubLabels:
-                        if hasattr(sub_label, 'Label'):
-                            sub_labels.append(sub_label.Label)
+            # 子标签作为描述
+            if hasattr(resp, 'SubLabel') and resp.SubLabel:
+                result['violation_description'] = resp.SubLabel
 
-                        if hasattr(sub_label, 'Description'):
-                            descriptions.append(sub_label.Description)
+            # Score 是 0-100 整数，归一化到 0-1
+            if hasattr(resp, 'Score') and resp.Score is not None:
+                result['confidence'] = resp.Score / 100.0
 
-                        # 获取最高置信度
-                        if hasattr(sub_label, 'Confidence'):
-                            max_confidence = max(max_confidence, sub_label.Confidence)
-
-                    if sub_labels:
-                        result['violation_label'] = ','.join(sub_labels)
-
-                    if descriptions:
-                        result['violation_description'] = '; '.join(descriptions)
-
-                    # 腾讯云 IMS 的 Confidence 取值 0-100，数据库列是 DECIMAL(5,4) (0-1)，归一化。
-                    result['confidence'] = max_confidence / 100.0 if max_confidence > 1.0 else max_confidence
-            
             # 保存原始结果
             result['raw_result'] = json.loads(resp.to_json_string())
             
