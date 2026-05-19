@@ -4,6 +4,7 @@
 """
 
 import hashlib
+import json
 import os
 import sys
 from datetime import datetime
@@ -170,109 +171,152 @@ class ImageSecurityScanner:
     # ------------------------------------------------------------------ 历史数据修复
 
     def _fix_historical_records(self):
-        """修复旧版解析 bug 遗留的 violation_type=NULL 记录，扫描前自动执行。
+        """修复旧版解析 bug 遗留的脏数据，扫描前自动执行。
 
-        两轮：
-          1. matched_by=ims_api  → 从 raw_result 重新解析 Label/Score/SubLabel
-          2. matched_by=content/similar → 从来源记录复制 violation 字段
+        处理三类问题：
+          0. is_violation=0 但有 violation_type → 清除（Normal 图片被错误写入违规字段）
+          1. is_violation=1, matched_by=ims_api, violation_type=NULL → 从 raw_result 重新解析
+          2. is_violation=1, matched_by=content/similar, violation_type=NULL → 从来源记录复制
+             （循环执行直到收敛，解决 A→B→C 多级链式依赖）
         """
-        # 同时清理 is_violation=0 但被旧 bug 写入了 violation_type/label 的脏数据
+        vmap = self.ims.VIOLATION_TYPE_MAP
+
+        # 第 0 步：清理 is_violation=0 但被错误写入了违规字段的记录
         self.db.execute_query(
-            "UPDATE image_scan_records SET violation_type=NULL, violation_label=NULL, "
-            "violation_description=NULL, confidence=NULL, updated_at=NOW() "
-            "WHERE is_violation = 0 AND violation_type IS NOT NULL",
+            "UPDATE image_scan_records "
+            "SET violation_type=NULL, violation_label=NULL, "
+            "    violation_description=NULL, confidence=NULL, updated_at=NOW() "
+            "WHERE is_violation=0 AND violation_type IS NOT NULL",
         )
 
         total = self.db.execute_query(
             "SELECT COUNT(*) AS c FROM image_scan_records "
-            "WHERE is_violation = 1 AND violation_type IS NULL",
+            "WHERE is_violation=1 AND violation_type IS NULL",
             fetch=True,
         )[0]['c']
-
         if not total:
             return
 
         logger.info(f"前置修复：发现 {total} 条 violation_type=NULL，开始修复...")
-        vmap = self.ims.VIOLATION_TYPE_MAP
 
-        # 第一轮：ims_api 记录
+        # 第 1 步：修复 ims_api 直接扫描记录（有 raw_result 可重新解析）
+        n1 = 0
         rows = self.db.execute_query(
             """
             SELECT id, ims_result FROM image_scan_records
-            WHERE is_violation = 1 AND violation_type IS NULL
+            WHERE is_violation=1 AND violation_type IS NULL
               AND ims_result IS NOT NULL
               AND JSON_UNQUOTE(JSON_EXTRACT(ims_result, '$.matched_by')) = 'ims_api'
             """,
             fetch=True,
         )
-        n1 = 0
         for row in rows:
             try:
                 ims = row['ims_result']
                 if isinstance(ims, str):
-                    import json as _json
-                    ims = _json.loads(ims)
-                raw = ims.get('raw_result', {})
-                label = raw.get('Label') or raw.get('label')
+                    ims = json.loads(ims)
+                raw = ims.get('raw_result') or {}
+                label = raw.get('Label') or raw.get('label') or ''
                 score = raw.get('Score') if raw.get('Score') is not None else raw.get('score')
-                sub_label = raw.get('SubLabel') or raw.get('subLabel')
-                if not label:
+                sub_label = raw.get('SubLabel') or raw.get('subLabel') or ''
+
+                # Label="Normal" 表示 API 认定无违规，不应写入 violation 字段
+                if not label or label == 'Normal':
                     continue
+
                 self.db.execute_query(
-                    "UPDATE image_scan_records SET violation_type=%s, violation_label=%s, "
-                    "violation_description=%s, confidence=%s, updated_at=NOW() WHERE id=%s",
-                    (vmap.get(label, 'other'), label, sub_label,
-                     round(score / 100.0, 4) if score is not None else None,
-                     row['id']),
+                    "UPDATE image_scan_records "
+                    "SET violation_type=%s, violation_label=%s, "
+                    "    violation_description=%s, confidence=%s, updated_at=NOW() "
+                    "WHERE id=%s",
+                    (
+                        vmap.get(label, 'other'),
+                        label,
+                        sub_label or None,          # 空字符串存 NULL
+                        round(score / 100.0, 4) if score is not None else None,
+                        row['id'],
+                    ),
                 )
                 n1 += 1
             except Exception as e:
-                logger.warning(f"前置修复 id={row['id']} 失败: {e}")
+                logger.warning(f"前置修复(ims_api) id={row['id']} 失败: {e}")
 
-        # 第二轮：content/similar 复用记录
-        rows = self.db.execute_query(
-            """
-            SELECT id, ims_result FROM image_scan_records
-            WHERE is_violation = 1 AND violation_type IS NULL
-              AND ims_result IS NOT NULL
-              AND JSON_UNQUOTE(JSON_EXTRACT(ims_result, '$.matched_by')) IN ('content', 'similar')
-            """,
-            fetch=True,
-        )
+        # 第 2 步：修复 content/similar 复用记录，循环至收敛（处理多级链式依赖）
+        # 例：A→B→C，第一轮修 C→B，第二轮再修 B→A
         n2 = 0
-        for row in rows:
-            try:
-                ims = row['ims_result']
-                if isinstance(ims, str):
-                    import json as _json
-                    ims = _json.loads(ims)
-                src_bucket = ims.get('source_bucket')
-                src_key = ims.get('source_object_key')
-                if not src_bucket or not src_key:
-                    continue
-                sources = self.db.execute_query(
-                    "SELECT violation_type, violation_label, violation_description, confidence "
-                    "FROM image_scan_records WHERE bucket_name=%s AND object_key=%s "
-                    "AND violation_type IS NOT NULL LIMIT 1",
-                    (src_bucket, src_key),
-                    fetch=True,
-                )
-                if not sources:
-                    continue
-                src = sources[0]
-                self.db.execute_query(
-                    "UPDATE image_scan_records SET violation_type=%s, violation_label=%s, "
-                    "violation_description=%s, confidence=%s, updated_at=NOW() WHERE id=%s",
-                    (src['violation_type'], src['violation_label'],
-                     src['violation_description'], src['confidence'], row['id']),
-                )
-                n2 += 1
-            except Exception as e:
-                logger.warning(f"前置修复 id={row['id']} 失败: {e}")
+        for iteration in range(10):                     # 最多 10 轮，防止死循环
+            rows = self.db.execute_query(
+                """
+                SELECT id, ims_result FROM image_scan_records
+                WHERE is_violation=1 AND violation_type IS NULL
+                  AND ims_result IS NOT NULL
+                  AND JSON_UNQUOTE(JSON_EXTRACT(ims_result, '$.matched_by'))
+                      IN ('content', 'similar')
+                """,
+                fetch=True,
+            )
+            if not rows:
+                break
 
-        remaining = total - n1 - n2
-        logger.info(f"前置修复完成：ims_api={n1} content/similar={n2} "
-                    f"剩余无法修复={remaining}")
+            fixed_this_round = 0
+            for row in rows:
+                try:
+                    ims = row['ims_result']
+                    if isinstance(ims, str):
+                        ims = json.loads(ims)
+                    src_bucket = ims.get('source_bucket')
+                    src_key = ims.get('source_object_key')
+                    if not src_bucket or not src_key:
+                        continue
+
+                    sources = self.db.execute_query(
+                        "SELECT violation_type, violation_label, "
+                        "       violation_description, confidence "
+                        "FROM image_scan_records "
+                        "WHERE bucket_name=%s AND object_key=%s "
+                        "  AND violation_type IS NOT NULL LIMIT 1",
+                        (src_bucket, src_key),
+                        fetch=True,
+                    )
+                    if not sources:
+                        continue
+
+                    src = sources[0]
+                    self.db.execute_query(
+                        "UPDATE image_scan_records "
+                        "SET violation_type=%s, violation_label=%s, "
+                        "    violation_description=%s, confidence=%s, updated_at=NOW() "
+                        "WHERE id=%s",
+                        (
+                            src['violation_type'],
+                            src['violation_label'],
+                            src['violation_description'],
+                            src['confidence'],
+                            row['id'],
+                        ),
+                    )
+                    n2 += 1
+                    fixed_this_round += 1
+                except Exception as e:
+                    logger.warning(f"前置修复(similar) id={row['id']} 失败: {e}")
+
+            if fixed_this_round == 0:
+                break       # 本轮无进展，链式依赖已全部收敛
+
+        # 实际查库计算剩余（算术估算不准确）
+        remaining = self.db.execute_query(
+            "SELECT COUNT(*) AS c FROM image_scan_records "
+            "WHERE is_violation=1 AND violation_type IS NULL",
+            fetch=True,
+        )[0]['c']
+
+        logger.info(
+            f"前置修复完成：ims_api={n1} content/similar={n2} 剩余无法修复={remaining}"
+        )
+        if remaining:
+            logger.warning(
+                f"  {remaining} 条记录缺少 raw_result 或来源已丢失，需重新扫描"
+            )
 
     # ------------------------------------------------------------------ 主循环
 
