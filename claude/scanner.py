@@ -234,15 +234,22 @@ class ImageSecurityScanner:
                 if not label or label == 'Normal':
                     continue
 
+                # Illegal 是大类，用 SubLabel 细分；其余直接查 VIOLATION_TYPE_MAP
+                illegal_map = self.ims.ILLEGAL_SUBLABEL_MAP
+                if label == 'Illegal':
+                    violation_type = illegal_map.get(sub_label, 'other')
+                else:
+                    violation_type = vmap.get(label, 'other')
+
                 self.db.execute_query(
                     "UPDATE image_scan_records "
                     "SET violation_type=%s, violation_label=%s, "
                     "    violation_description=%s, confidence=%s, updated_at=NOW() "
                     "WHERE id=%s",
                     (
-                        vmap.get(label, 'other'),
+                        violation_type,
                         label,
-                        sub_label or None,          # 空字符串存 NULL
+                        sub_label or None,
                         round(score / 100.0, 4) if score is not None else None,
                         row['id'],
                     ),

@@ -15,18 +15,34 @@ from loguru import logger
 class TencentIMSScanner:
     """腾讯云图片内容安全扫描器"""
     
-    # 违规类型映射
+    # 顶层 Label → violation_type 映射（基于 IMS API 实际返回值）
     VIOLATION_TYPE_MAP = {
-        'Porn': 'porn',           # 色情
-        'Gambling': 'gambling',    # 赌博/棋牌
-        'Violence': 'violence',    # 暴力
-        'Politics': 'politics',    # 政治敏感
-        'Ads': 'ads',              # 广告
-        'Terrorism': 'terrorism',  # 恐怖主义
-        'Contraband': 'contraband', # 违禁品
-        'Vulgar': 'vulgar',        # 低俗
-        'Qrcode': 'qrcode',        # 二维码
-        'Others': 'other'          # 其他
+        'Porn': 'porn',          # 色情
+        'Sexy': 'porn',          # 性感擦边
+        'Ad': 'ads',             # 广告（API 返回 Ad，非 Ads）
+        'Polity': 'politics',    # 政治敏感（API 返回 Polity，非 Politics）
+        'Politics': 'politics',  # 兼容旧值
+        'Terror': 'terrorism',   # 恐怖（API 返回 Terror）
+        'Terrorism': 'terrorism',
+        'Violence': 'violence',
+        'Contraband': 'contraband',
+        'Abuse': 'vulgar',       # 谩骂低俗（API 返回 Abuse，非 Vulgar）
+        'Vulgar': 'vulgar',
+        'Qrcode': 'qrcode',
+        'Teenager': 'other',     # 未成年人保护
+        'Spam': 'other',
+        'Others': 'other',
+        'Other': 'other',
+    }
+
+    # Illegal 是大类，需借助 SubLabel 细分具体违规类型
+    ILLEGAL_SUBLABEL_MAP = {
+        'Gamble': 'gambling',    # 赌博
+        'Gambling': 'gambling',
+        'Drug': 'contraband',    # 毒品
+        'Weapon': 'contraband',  # 武器
+        'Bloody': 'violence',    # 血腥
+        'Others': 'other',
     }
     
     def __init__(self, secret_id: str, secret_key: str, region: str = "ap-guangzhou"):
@@ -147,13 +163,21 @@ class TencentIMSScanner:
                 result['is_violation'] = True
 
             # resp.Label 是字符串（如 "Porn"），"Normal" 表示正常，不写入违规字段
-            if hasattr(resp, 'Label') and resp.Label and resp.Label != 'Normal':
-                result['violation_label'] = resp.Label
-                result['violation_type'] = self.VIOLATION_TYPE_MAP.get(resp.Label, 'other')
+            label = resp.Label if hasattr(resp, 'Label') else ''
+            sub_label = resp.SubLabel if hasattr(resp, 'SubLabel') else ''
+            if label and label != 'Normal':
+                result['violation_label'] = label
+                if label == 'Illegal':
+                    # Illegal 是大类，用 SubLabel 细分（如 Gamble→gambling）
+                    result['violation_type'] = self.ILLEGAL_SUBLABEL_MAP.get(
+                        sub_label, 'other'
+                    )
+                else:
+                    result['violation_type'] = self.VIOLATION_TYPE_MAP.get(label, 'other')
 
             # 子标签作为描述（仅违规时有意义）
-            if hasattr(resp, 'SubLabel') and resp.SubLabel:
-                result['violation_description'] = resp.SubLabel
+            if sub_label:
+                result['violation_description'] = sub_label
 
             # Score 是 0-100 整数，归一化到 0-1；仅违规时存置信度
             if result['is_violation'] and hasattr(resp, 'Score') and resp.Score is not None:
