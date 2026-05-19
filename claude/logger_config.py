@@ -52,7 +52,7 @@ def setup_logger(log_dir: str = "logs", scan_limit: int = None):
     logger.add(
         error_log_file,
         level="ERROR",
-        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line}\n{exception}\n{message}\n{'='*80}\n",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line}\n{exception}\n{message}\n" + "=" * 80 + "\n",
         rotation="50 MB",
         retention="90 days",  # 错误日志保留更久
         compression="zip",

@@ -62,7 +62,7 @@ class MinIOClient:
         try:
             data = response.read()
             metadata = {
-                'content_type': response.content_type or 'application/octet-stream',
+                'content_type': response.headers.get('content-type') or 'application/octet-stream',
                 'size': response.size,
                 'last_modified': response.last_modified,
             }
