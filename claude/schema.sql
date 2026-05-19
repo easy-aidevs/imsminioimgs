@@ -35,8 +35,8 @@ CREATE TABLE IF NOT EXISTS image_scan_records (
     scan_status VARCHAR(20) DEFAULT 'pending' COMMENT '扫描状态: pending(待扫描)/scanning(扫描中)/completed(已完成)/failed(失败)',
     error_message TEXT DEFAULT NULL COMMENT '错误信息',
     
-    -- 对象访问控制
-    blocked TINYINT(1) DEFAULT 0 COMMENT '是否被block: 0-正常, 1-已block（通过MinIO标签标记）',
+    -- 对象访问控制（三阶段处置状态）
+    blocked TINYINT(1) DEFAULT 0 COMMENT '处置状态: 0-public(未处理), 1-private(隐藏观察期), 2-quarantined(已隔离)',
     
     -- 时间戳
     first_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '首次发现时间',

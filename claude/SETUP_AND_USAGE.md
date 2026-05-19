@@ -94,26 +94,38 @@ USE image_security;
 SOURCE schema.sql;
 ```
 
-如果没有 `schema.sql`，参考以下 SQL：
+详见 `schema.sql` 文件，或在 MySQL 中执行：
 
+```bash
+mysql -u root -p image_security < schema.sql
+```
+
+**主要字段说明：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | BIGINT | 主键 ID |
+| `key` | VARCHAR(128) | 图片唯一标识 (md5-size) |
+| `bucket_name`, `object_key` | VARCHAR | MinIO 存储位置 |
+| `is_violation` | TINYINT | 是否违规：0=否, 1=是 |
+| `violation_type` | VARCHAR | 违规类型：gambling/porn/violence/politics/ads 等 |
+| `violation_label` | VARCHAR | 违规细分标签 |
+| `confidence` | DECIMAL(5,4) | 置信度：0.0000-1.0000 |
+| `blocked` | TINYINT | **处置状态**（三阶段）：0=public, 1=private, 2=quarantined |
+| `feature_hash` | VARCHAR(64) | 感知哈希（相似图片检测） |
+| `scan_status` | VARCHAR(20) | 扫描状态：pending/scanning/completed/failed |
+| `ims_result` | JSON | 腾讯云 IMS 原始返回结果 |
+| `first_seen_at` | DATETIME | 首次发现时间 |
+| `last_scanned_at` | DATETIME | 最后扫描时间 |
+| `created_at`, `updated_at` | DATETIME | 创建和更新时间 |
+
+**重要索引：**
 ```sql
-CREATE TABLE image_scan_records (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  bucket_name VARCHAR(255) NOT NULL,
-  object_key VARCHAR(1024) NOT NULL,
-  is_violation INT DEFAULT 0,           -- 0=正常, 1=违规
-  violation_type VARCHAR(100),           -- 违规类型（如 gambling, porn）
-  violation_label VARCHAR(255),          -- 违规标签详细描述
-  confidence FLOAT,                      -- 置信度 0-100
-  blocked INT DEFAULT 0,                 -- 处置状态：0=public, 1=private, 2=quarantined
-  feature_hash VARCHAR(64),              -- 感知哈希（用于去重）
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_location (bucket_name, object_key),
-  KEY idx_violation (is_violation),
-  KEY idx_blocked (blocked),
-  KEY idx_type (violation_type)
-);
+UNIQUE KEY uk_bucket_object (bucket_name, object_key(255))  -- 同一路径唯一
+INDEX idx_is_violation (is_violation)      -- 查询违规
+INDEX idx_blocked (blocked)                -- 查询处置状态
+INDEX idx_feature_hash (feature_hash)      -- 相似检测
+INDEX idx_violation_type (violation_type)  -- 按类型查询
 ```
 
 ---

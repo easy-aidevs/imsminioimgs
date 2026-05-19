@@ -20,8 +20,16 @@ from database import ImageDatabase
 
 logger = setup_logger(log_dir="logs")
 
-# 汉明距离 <= 此阈值视为"高度相似"，直接复用扫描结果，跳过 IMS。
-# 4-5 之间属于"中度相似"，仍调用 IMS 复核。
+# 汉明距离说明（基于8x8 pHash的64位哈希）：
+#   距离=0     完全相同（像素级重复）
+#   距离=1-3   高度相似（<5%像素变化，视觉上几乎相同）→ 直接复用
+#   距离=4-5   中度相似（5-8%像素变化，轮廓/颜色接近）→ 调用IMS复核
+#   距离6+     不相似（>8%像素变化）→ 新增扫描
+#
+# 性能考量：
+#   缓存只包含最近10000条（LRU），覆盖率仅1%，大部分查询仍需查数据库。
+#   若只查缓存可能遗漏最相似的记录（距离4 vs 距离1），故必须双层查询。
+#   双层查询成本：缓存O(n) + 数据库O(m)，但可避免不必要的IMS API调用。
 SIMILAR_DISTANCE_REUSE = 3
 SIMILAR_DISTANCE_MAX = 5
 
@@ -55,10 +63,11 @@ class ImageSecurityScanner:
 
         self.stats = {
             'total': 0,
-            'scanned': 0,      # 调用了 IMS API 的数量
-            'violations': 0,
+            'scanned': 0,      # 实际调用了 IMS API 的数量
+            'violations': 0,   # 检测出违规的总数（不管来源）
             'skipped': 0,      # 路径/内容去重命中、未调用 API
-            'api_saved': 0,    # 通过相似匹配复用结果，少调一次 API
+            'api_saved': 0,    # 通过特征相似复用结果，省去 IMS API 调用
+            'reused': 0,       # 通过路径/内容/特征复用的总数
             'errors': 0,
         }
 
@@ -79,6 +88,12 @@ class ImageSecurityScanner:
 
     # ------------------------------------------------------------------ 缓存管理
 
+    def _is_complete_record(self, record: Dict) -> bool:
+        """检查记录是否包含必需的字段（用于缓存完整性验证）。"""
+        required = ['key', 'bucket_name', 'object_key', 'feature_hash',
+                    'is_violation', 'violation_type', 'violation_label']
+        return all(k in record for k in required)
+
     def _load_scanned_to_cache(self):
         """从数据库加载已扫描图片到特征缓存。"""
         try:
@@ -93,7 +108,8 @@ class ImageSecurityScanner:
             loaded_count = 0
             for record in scanned_images:
                 feature_hash = record.get('feature_hash')
-                if feature_hash:
+                # 只加载包含必需字段的完整记录
+                if feature_hash and self._is_complete_record(record):
                     if feature_hash not in self.feature_cache:
                         if self.cache_strategy == 'lru' and len(self.feature_cache) >= self.cache_max_size:
                             break
@@ -106,11 +122,15 @@ class ImageSecurityScanner:
             logger.warning(f"加载特征缓存失败: {e}")
 
     def _add_to_feature_cache(self, record: Dict):
-        """将新记录添加到特征缓存。"""
+        """将新记录添加到特征缓存。使用 LRU 防止内存溢出。"""
         feature_hash = record.get('feature_hash')
         if not feature_hash:
             return
         if feature_hash not in self.feature_cache:
+            # LRU 淘汰：缓存满时删除最早的特征
+            if self.cache_strategy == 'lru' and len(self.feature_cache) >= self.cache_max_size:
+                oldest_key = next(iter(self.feature_cache))
+                del self.feature_cache[oldest_key]
             self.feature_cache[feature_hash] = []
         self.feature_cache[feature_hash].append(record)
 
@@ -128,6 +148,24 @@ class ImageSecurityScanner:
                     similar.append(record_copy)
         similar.sort(key=lambda x: x['hash_distance'])
         return similar[:10]
+
+    def _merge_similar_results(self, cache_results: list, db_results: list) -> list:
+        """合并缓存和数据库的相似结果，去重后按距离排序。
+
+        由于缓存只包含部分记录，必须查数据库以保证找到最相似的图片。
+        本方法按key去重，保留距离最小的版本，最后返回top10。
+        """
+        # 用dict按key去重，距离小的覆盖距离大的
+        merged = {}
+        for result in db_results + cache_results:
+            key = result.get('key')
+            if key:
+                if key not in merged or result['hash_distance'] < merged[key]['hash_distance']:
+                    merged[key] = result
+
+        # 按距离排序，取top10
+        similar_list = sorted(merged.values(), key=lambda x: x['hash_distance'])
+        return similar_list[:10]
 
     # ------------------------------------------------------------------ 主循环
 
@@ -175,53 +213,68 @@ class ImageSecurityScanner:
             existing = self.db.find_by_bucket_object(bucket, object_name)
             if existing:
                 self.stats['skipped'] += 1
+                self.stats['reused'] += 1
                 if existing.get('is_violation'):
                     self.stats['violations'] += 1
-                    logger.warning(f"违规(路径重复): {object_name} | "
-                                   f"类型={existing.get('violation_type')}")
+                    logger.warning(f"复用(路径重复): {object_name} | "
+                                   f"状态=违规 | 类型={existing.get('violation_type')}")
+                else:
+                    logger.debug(f"复用(路径重复): {object_name} | 状态=正规")
                 return
 
-        # 下载图片，准备做内容级和特征级判断。
-        image_data = self.minio.get_object_data(bucket, object_name)
+        # 下载图片和元数据，准备做内容级和特征级判断。
+        image_data, metadata = self.minio.get_object_data(bucket, object_name)
         key = self.features.calculate_key(image_data)
         feats = self.features.extract_features(image_data)
+        content_type = metadata.get('content_type')
 
         # 第2层：内容去重——相同内容不同路径，复用扫描结果但插一条新路径记录。
         if not force_rescan:
             same_content = self.db.find_by_key(key)
             if same_content:
                 self._write_reused(bucket, object_name, image_data, key, feats,
-                                   source=same_content, match='content')
+                                   source=same_content, match='content',
+                                   content_type=content_type)
                 self.stats['skipped'] += 1
+                self.stats['reused'] += 1
                 if same_content.get('is_violation'):
                     self.stats['violations'] += 1
-                    logger.warning(f"违规(内容重复): {object_name} | "
-                                   f"类型={same_content.get('violation_type')}")
+                    logger.warning(f"复用(内容重复): {object_name} | "
+                                   f"状态=违规 | 类型={same_content.get('violation_type')}")
+                else:
+                    logger.debug(f"复用(内容重复): {object_name} | 状态=正规")
                 return
 
         # 第3层：特征相似——若有高度相似的已扫描图片，复用其结果。
-        # 先查缓存（快速），再查数据库
-        similar = self._find_similar_in_cache(feats['phash'], max_distance=SIMILAR_DISTANCE_MAX)
-        if not similar:
-            similar = self.db.find_similar_scanned(feats['phash'],
-                                                   max_distance=SIMILAR_DISTANCE_MAX)
-        if similar and similar[0]['hash_distance'] <= SIMILAR_DISTANCE_REUSE:
-            most = similar[0]
+        # 策略：缓存优先（快速），但一定查数据库以确保找到最相似的。
+        # 取缓存和数据库结果中距离最小的。
+        cache_similar = self._find_similar_in_cache(feats['phash'], max_distance=SIMILAR_DISTANCE_MAX)
+        db_similar = self.db.find_similar_scanned(feats['phash'],
+                                                  max_distance=SIMILAR_DISTANCE_MAX)
+        # 合并并去重：优先使用距离最小的
+        all_similar = self._merge_similar_results(cache_similar, db_similar)
+
+        if all_similar and all_similar[0]['hash_distance'] <= SIMILAR_DISTANCE_REUSE:
+            most = all_similar[0]
             self._write_reused(bucket, object_name, image_data, key, feats,
                                source=most, match='similar',
-                               distance=most['hash_distance'])
-            self.stats['scanned'] += 1
+                               distance=most['hash_distance'], content_type=content_type)
+            self.stats['skipped'] += 1
             self.stats['api_saved'] += 1
+            self.stats['reused'] += 1
             if most.get('is_violation'):
                 self.stats['violations'] += 1
-                logger.warning(f"违规(相似匹配): {object_name} | "
-                               f"距离={most['hash_distance']} | "
+                logger.warning(f"复用(特征相似): {object_name} | "
+                               f"状态=违规 | 距离={most['hash_distance']} | "
                                f"类型={most.get('violation_type')}")
+            else:
+                logger.debug(f"复用(特征相似): {object_name} | 状态=正规 | 距离={most['hash_distance']}")
             return
 
         # 走到这里：必须调用 IMS API。
         ims_result = self.ims.scan_image(image_data)
-        self._write_ims(bucket, object_name, image_data, key, feats, ims_result)
+        self._write_ims(bucket, object_name, image_data, key, feats, ims_result,
+                       content_type=content_type)
 
         self.stats['scanned'] += 1
         if ims_result['is_violation']:
@@ -233,7 +286,8 @@ class ImageSecurityScanner:
     # ------------------------------------------------------------------ 写库辅助
 
     def _build_record_base(self, bucket: str, object_name: str,
-                           image_data: bytes, key: str, feats: Dict) -> Dict:
+                           image_data: bytes, key: str, feats: Dict,
+                           content_type: str = None) -> Dict:
         return {
             'key': key,
             'feature_hash': feats['phash'],
@@ -243,6 +297,7 @@ class ImageSecurityScanner:
             'bucket_name': bucket,
             'object_key': object_name,
             'file_size': len(image_data),
+            'content_type': content_type,
             'blocked': 0,
             'scan_status': 'completed',
             'last_scanned_at': datetime.now(),
@@ -250,9 +305,10 @@ class ImageSecurityScanner:
 
     def _write_reused(self, bucket: str, object_name: str, image_data: bytes,
                       key: str, feats: Dict, source: Dict, match: str,
-                      distance: int = 0):
+                      distance: int = 0, content_type: str = None):
         """根据已有的扫描记录写入新路径，不调用 IMS。"""
-        record = self._build_record_base(bucket, object_name, image_data, key, feats)
+        record = self._build_record_base(bucket, object_name, image_data, key, feats,
+                                         content_type=content_type)
         record.update({
             'is_violation': 1 if source.get('is_violation') else 0,
             'violation_type': source.get('violation_type'),
@@ -271,9 +327,10 @@ class ImageSecurityScanner:
         self._add_to_feature_cache(record)
 
     def _write_ims(self, bucket: str, object_name: str, image_data: bytes,
-                   key: str, feats: Dict, ims_result: Dict):
+                   key: str, feats: Dict, ims_result: Dict, content_type: str = None):
         """根据 IMS 返回结果写入新记录。"""
-        record = self._build_record_base(bucket, object_name, image_data, key, feats)
+        record = self._build_record_base(bucket, object_name, image_data, key, feats,
+                                         content_type=content_type)
         record.update({
             'is_violation': 1 if ims_result['is_violation'] else 0,
             'violation_type': ims_result.get('violation_type'),
@@ -281,7 +338,11 @@ class ImageSecurityScanner:
             'violation_description': ims_result.get('violation_description'),
             'confidence': ims_result.get('confidence'),
             'suggestion': ims_result.get('suggestion'),
-            'ims_result': ims_result.get('raw_result'),
+            'ims_result': {
+                'matched_by': 'ims_api',
+                'raw_result': ims_result.get('raw_result'),
+                'request_id': ims_result.get('request_id'),
+            },
             'ims_request_id': ims_result.get('request_id'),
         })
         self.db.upsert_record(record)
@@ -295,9 +356,15 @@ class ImageSecurityScanner:
             self.db.upsert_record({
                 'key': f"error-{path_hash}",
                 'feature_hash': '',
+                'feature_hash_dhash': '',
+                'feature_hash_ahash': '',
+                'feature_hash_phash': '',
                 'bucket_name': bucket,
                 'object_key': object_name,
                 'file_size': 0,
+                'content_type': None,
+                'is_violation': 0,
+                'blocked': 0,
                 'scan_status': 'failed',
                 'error_message': error_msg,
                 'last_scanned_at': datetime.now(),
@@ -309,11 +376,11 @@ class ImageSecurityScanner:
 
     def _log_stats(self):
         logger.info(
-            f"统计 - 总:{self.stats['total']} "
-            f"已扫描:{self.stats['scanned']} "
-            f"违规:{self.stats['violations']} "
-            f"跳过:{self.stats['skipped']} "
-            f"节约API:{self.stats['api_saved']} "
+            f"统计 - 总:{self.stats['total']} | "
+            f"IMS扫描:{self.stats['scanned']} | "
+            f"复用:{self.stats['reused']} | "
+            f"违规:{self.stats['violations']} | "
+            f"节约API:{self.stats['api_saved']} | "
             f"错误:{self.stats['errors']}"
         )
 

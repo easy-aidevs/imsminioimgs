@@ -62,19 +62,21 @@ def setup_logger(log_dir: str = "logs", scan_limit: int = None):
         diagnose=True  # 显示变量值
     )
     
-    # 4. 违规图片专用日志 - WARNING级别
+    # 4. 违规图片处置专用日志 - INFO级别及以上（记录违规处置的全过程）
     violation_log_file = os.path.join(log_dir, "violations.log")
     logger.add(
         violation_log_file,
-        level="WARNING",
-        filter=lambda record: record["level"].name == "WARNING" and "违规" in record["message"],
-        format="{time:YYYY-MM-DD HH:mm:ss} | {message}\n",
+        level="INFO",
+        filter=lambda record: any(
+            keyword in record["message"]
+            for keyword in ["mark-private", "confirm-quarantine", "restore-public", "delete", "违规"]
+        ),
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}\n",
         rotation="50 MB",
         retention="90 days",
         compression="zip",
         enqueue=True,
-        encoding="utf-8",
-        mode="a"
+        encoding="utf-8"
     )
     
     logger.info(f"日志系统初始化完成")

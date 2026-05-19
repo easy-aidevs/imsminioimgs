@@ -44,16 +44,15 @@ class ImageFeatureExtractor:
     def extract_features(self, image_data: bytes) -> Dict[str, str]:
         """
         提取图片的多种哈希特征
-        
+
         Args:
             image_data: 图片二进制数据
-            
+
         Returns:
             Dict[str, str]: 包含多种哈希特征的字典
-                - phash: 感知哈希 (Perceptual Hash)
+                - phash: 感知哈希 (Perceptual Hash) - 主特征
                 - dhash: 差异哈希 (Difference Hash)
                 - ahash: 平均哈希 (Average Hash)
-                - whash: 小波哈希 (Wavelet Hash)
         """
         try:
             # 将二进制数据转换为PIL Image对象
@@ -76,16 +75,8 @@ class ImageFeatureExtractor:
             # 3. 平均哈希 (aHash) - 简单快速
             ahash = imagehash.average_hash(image, hash_size=self.hash_size)
             features['ahash'] = str(ahash)
-            
-            # 4. 小波哈希 (wHash) - 结合频率和空间信息
-            try:
-                whash = imagehash.whash(image, hash_size=self.hash_size)
-                features['whash'] = str(whash)
-            except Exception as e:
-                logger.warning(f"计算whash失败: {e}，使用phash代替")
-                features['whash'] = features['phash']
-            
-            # 综合特征：使用phash作为主要特征
+
+            # 综合特征：使用phash作为主要特征（phash对缩放和亮度变化最鲁棒）
             features['feature_hash'] = features['phash']
             
             logger.debug(f"图片特征提取成功: phash={features['phash']}")
