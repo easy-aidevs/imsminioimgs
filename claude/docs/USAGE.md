@@ -114,9 +114,23 @@ python handle_violations.py mark-private --type <type> [选项]
 ```
 
 **选项**：
-- `--type <type>`：违规类型（gambling/porn/violence/politics/terrorism/ads/contraband/vulgar/qrcode）
+- `--type <type>`：违规类型（见下表）
 - `--ids <ids>`：指定 ID，如 `--ids 1,2,3`（不指定则处理该类型的所有）
 - `--dry-run`：预演，不实际执行
+
+**违规类型说明**：
+
+| 类型 | 中文含义 | 说明 | 优先级 |
+|------|---------|------|--------|
+| `gambling` | 赌博 | 赌场、赌博网站、赌博相关内容 | 🔴 高 |
+| `porn` | 色情 | 不雅、色情相关内容 | 🔴 高 |
+| `violence` | 暴力 | 暴力、血腥、残暴内容 | 🟠 中 |
+| `politics` | 政治 | 政治敏感内容 | 🟠 中 |
+| `terrorism` | 恐怖 | 恐怖主义相关内容 | 🔴 高 |
+| `ads` | 广告 | 虚假或骚扰广告 | 🟡 低 |
+| `contraband` | 违禁品 | 毒品、枪支等违禁品 | 🔴 高 |
+| `vulgar` | 低俗 | 低俗、不适当语言或手势 | 🟡 低 |
+| `qrcode` | 二维码 | 未知/可疑二维码 | 🟡 低 |
 
 **示例**：
 ```bash

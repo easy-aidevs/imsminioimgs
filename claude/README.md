@@ -169,7 +169,19 @@ Docker 部署：`docker-compose up`
 
 ## 违规类型
 
-腾讯云 IMS 支持的类型：`gambling`（赌博，重点）、`porn`、`violence`、`politics`、`terrorism`、`ads`、`contraband`、`vulgar`、`qrcode`。
+腾讯云 IMS 检测的 9 种违规类型：
+
+| 类型 | 中文 | 说明 |
+|------|------|------|
+| `gambling` | 赌博 | 赌场、赌博网站、赌博相关内容（🔴 高优先级）|
+| `porn` | 色情 | 不雅、色情相关内容（🔴 高优先级）|
+| `violence` | 暴力 | 暴力、血腥、残暴内容 |
+| `politics` | 政治 | 政治敏感内容 |
+| `terrorism` | 恐怖 | 恐怖主义相关内容（🔴 高优先级）|
+| `contraband` | 违禁品 | 毒品、枪支等违禁品（🔴 高优先级）|
+| `ads` | 广告 | 虚假或骚扰广告 |
+| `vulgar` | 低俗 | 低俗、不适当语言或手势 |
+| `qrcode` | 二维码 | 未知/可疑二维码 |
 
 ## 日志
 
