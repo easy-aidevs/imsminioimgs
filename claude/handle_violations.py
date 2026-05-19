@@ -308,6 +308,14 @@ class ViolationHandler:
             (record_id,),
         )
 
+    def _mark_restored(self, record_id: int):
+        """从隔离桶恢复，视为误判（blocked=0, is_violation=0）"""
+        self.db.execute_query(
+            "UPDATE image_scan_records SET blocked = 0, is_violation = 0, "
+            "updated_at = NOW() WHERE id = %s",
+            (record_id,),
+        )
+
     def close(self):
         self.db.close()
 
