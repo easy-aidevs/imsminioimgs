@@ -119,7 +119,8 @@ services:
       - ims-network
 
     # 默认命令：显示帮助（实际执行时会被覆盖）
-    command: ["python", "-c", "print('Scanner 已就绪。\\n使用: docker-compose run --rm scanner python scanner.py')"]
+    # command: ["python", "-c", "print('Scanner 已就绪。\\n使用: docker-compose run --rm scanner python scanner.py')"]
+    command: ["python", "scanner.py"]
 
   # 违规处置服务
   # 功能：标记私密、隔离、恢复、删除等处置操作
