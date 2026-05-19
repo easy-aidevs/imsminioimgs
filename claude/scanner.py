@@ -17,6 +17,7 @@ from minio_client import MinIOClient
 from image_feature import ImageFeatureExtractor
 from tencent_ims import TencentIMSScanner
 from database import ImageDatabase
+import fix_violation_records
 
 logger = setup_logger(log_dir="logs")
 
@@ -444,6 +445,13 @@ def load_config() -> Dict:
 def main():
     try:
         config = load_config()
+
+        # 前置修复：修复历史记录中因旧版解析 bug 导致的 violation_type=NULL
+        try:
+            fix_violation_records.main()
+        except Exception as fix_err:
+            logger.warning(f"前置修复跳过（不影响扫描）: {fix_err}")
+
         with ImageSecurityScanner(config) as scanner:
             scanner.scan_all(
                 bucket_name=os.getenv('SCAN_BUCKET_NAME') or config['minio']['bucket_name'],
