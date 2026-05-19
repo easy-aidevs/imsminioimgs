@@ -111,6 +111,17 @@ class ImageDatabase:
         similar.sort(key=lambda x: x['hash_distance'])
         return similar[:10]
 
+    def get_all_scanned_images(self, limit: int = None) -> List[Dict]:
+        """获取所有已扫描的图片（用于加载到缓存）。"""
+        query = """
+            SELECT * FROM image_scan_records
+            WHERE scan_status = 'completed'
+            ORDER BY created_at DESC
+        """
+        if limit:
+            query += f" LIMIT {limit}"
+        return self.execute_query(query, fetch=True)
+
     def get_violation_images(self, limit: int = 100, offset: int = 0) -> List[Dict]:
         """分页获取违规图片列表。"""
         return self.execute_query(

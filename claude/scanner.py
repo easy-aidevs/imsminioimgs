@@ -62,7 +62,72 @@ class ImageSecurityScanner:
             'errors': 0,
         }
 
+        # 特征缓存：key -> list of record dicts，用于快速查找相似图片
+        self.feature_cache = {}
+        cache_config = config.get('cache', {})
+        self.cache_enabled = cache_config.get('enabled', True)
+        self.cache_max_size = cache_config.get('max_size', 10000)
+        self.cache_strategy = cache_config.get('strategy', 'lru')
+
         logger.info("扫描器初始化完成")
+
+        # 初始化时从数据库加载已有的扫描记录到缓存
+        if self.cache_enabled and self.cache_strategy != 'none':
+            self._load_scanned_to_cache()
+        else:
+            logger.info("特征缓存已禁用")
+
+    # ------------------------------------------------------------------ 缓存管理
+
+    def _load_scanned_to_cache(self):
+        """从数据库加载已扫描图片到特征缓存。"""
+        try:
+            logger.info("加载已扫描图片到特征缓存...")
+            scanned_images = self.db.get_all_scanned_images(
+                limit=self.cache_max_size * 10 if self.cache_strategy == 'lru' else None
+            )
+            if not scanned_images:
+                logger.info("没有历史扫描记录")
+                return
+
+            loaded_count = 0
+            for record in scanned_images:
+                feature_hash = record.get('feature_hash')
+                if feature_hash:
+                    if feature_hash not in self.feature_cache:
+                        if self.cache_strategy == 'lru' and len(self.feature_cache) >= self.cache_max_size:
+                            break
+                        self.feature_cache[feature_hash] = []
+                    self.feature_cache[feature_hash].append(record)
+                    loaded_count += 1
+
+            logger.info(f"特征缓存加载完成: {loaded_count}条记录, {len(self.feature_cache)}个特征")
+        except Exception as e:
+            logger.warning(f"加载特征缓存失败: {e}")
+
+    def _add_to_feature_cache(self, record: Dict):
+        """将新记录添加到特征缓存。"""
+        feature_hash = record.get('feature_hash')
+        if not feature_hash:
+            return
+        if feature_hash not in self.feature_cache:
+            self.feature_cache[feature_hash] = []
+        self.feature_cache[feature_hash].append(record)
+
+    def _find_similar_in_cache(self, feature_hash: str, max_distance: int = 5) -> list:
+        """在缓存中查找相似的特征。"""
+        if not self.cache_enabled:
+            return []
+        similar = []
+        for cached_hash, records in self.feature_cache.items():
+            distance = self.features.calculate_hash_distance(feature_hash, cached_hash)
+            if 0 <= distance <= max_distance:
+                for record in records:
+                    record_copy = record.copy()
+                    record_copy['hash_distance'] = distance
+                    similar.append(record_copy)
+        similar.sort(key=lambda x: x['hash_distance'])
+        return similar[:10]
 
     # ------------------------------------------------------------------ 主循环
 
@@ -135,8 +200,11 @@ class ImageSecurityScanner:
                 return
 
         # 第3层：特征相似——若有高度相似的已扫描图片，复用其结果。
-        similar = self.db.find_similar_scanned(feats['phash'],
-                                               max_distance=SIMILAR_DISTANCE_MAX)
+        # 先查缓存（快速），再查数据库
+        similar = self._find_similar_in_cache(feats['phash'], max_distance=SIMILAR_DISTANCE_MAX)
+        if not similar:
+            similar = self.db.find_similar_scanned(feats['phash'],
+                                                   max_distance=SIMILAR_DISTANCE_MAX)
         if similar and similar[0]['hash_distance'] <= SIMILAR_DISTANCE_REUSE:
             most = similar[0]
             self._write_reused(bucket, object_name, image_data, key, feats,
@@ -200,6 +268,7 @@ class ImageSecurityScanner:
             },
         })
         self.db.upsert_record(record)
+        self._add_to_feature_cache(record)
 
     def _write_ims(self, bucket: str, object_name: str, image_data: bytes,
                    key: str, feats: Dict, ims_result: Dict):
@@ -216,6 +285,7 @@ class ImageSecurityScanner:
             'ims_request_id': ims_result.get('request_id'),
         })
         self.db.upsert_record(record)
+        self._add_to_feature_cache(record)
 
     def _record_error(self, bucket: str, object_name: str, err: Exception):
         # key 字段长 VARCHAR(128)，object_name 可能很长，用 md5 保证长度有界。
@@ -283,6 +353,11 @@ def load_config() -> Dict:
             'database': os.getenv('MYSQL_DATABASE', 'image_security'),
         },
         'hash_size': int(os.getenv('HASH_SIZE', '8')),
+        'cache': {
+            'enabled': os.getenv('CACHE_ENABLED', 'true').lower() == 'true',
+            'strategy': os.getenv('CACHE_STRATEGY', 'lru'),
+            'max_size': int(os.getenv('CACHE_MAX_SIZE', '10000')),
+        },
     }
 
     required = [
