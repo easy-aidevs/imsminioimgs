@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""违规图片处置工具：把违规图片从业务桶移到隔离桶，确认后再彻底删除。
+"""违规图片处置工具：三阶段处理（私密观察 -> 隔离 -> 删除）。
 
 机制：
-- block:   原桶 -> 隔离桶（URL 失效，用户无法访问）+ 打 violation 标签做标记
-- restore: 隔离桶 -> 原桶（恢复访问）+ 清除标签
-- delete:  从隔离桶彻底删除
+- mark_private:       原桶 -> 标记私密（无法公开访问，但保留在原桶观察）
+- confirm_quarantine: 原桶(private) -> 隔离桶（观察正常，彻底隔离）
+- restore_public:     原桶(private) -> 改回公开（观察异常，视为误判）
+- delete:             隔离桶 -> 彻底删除
 
-数据库 `blocked` 字段标识当前状态：0=在原桶，1=已移至隔离桶。
-原始 bucket_name/object_key 始终保留在记录中，作为"应在的位置"。
+数据库 `blocked` 字段标识当前状态：
+  0 = public      （未处理）
+  1 = private     （隐藏观察期）
+  2 = quarantined （已隔离）
 """
 
 import argparse
@@ -55,7 +58,7 @@ class ViolationHandler:
     def list_violations(self, violation_type: str = None,
                         confidence: float = 0.0,
                         only_active: bool = True) -> List[Dict]:
-        """列出违规图片。only_active=True 只返回尚未 block 的。"""
+        """列出违规图片。only_active=True 只返回尚未处理的（blocked=0）。"""
         query = """
             SELECT id, bucket_name, object_key, violation_type,
                    violation_label, confidence, blocked
@@ -74,22 +77,44 @@ class ViolationHandler:
         query += " ORDER BY violation_type, confidence DESC"
         return self.db.execute_query(query, tuple(params), fetch=True)
 
-    def list_blocked(self, ids: List[int] = None) -> List[Dict]:
-        """已被 block（迁移到隔离桶）的记录。"""
+    def list_private(self, violation_type: str = None,
+                     confidence: float = 0.0, ids: List[int] = None) -> List[Dict]:
+        """列出标记为 private 的图片（观察期）。blocked=1"""
+        query = """
+            SELECT id, bucket_name, object_key, violation_type, confidence, blocked
+            FROM image_scan_records
+            WHERE blocked = 1
+        """
+        params = []
+        if ids:
+            placeholders = ','.join(['%s'] * len(ids))
+            query += f" AND id IN ({placeholders})"
+            params.extend(ids)
+        if violation_type:
+            query += " AND violation_type = %s"
+            params.append(violation_type)
+        if confidence > 0:
+            query += " AND confidence >= %s"
+            params.append(confidence)
+        query += " ORDER BY updated_at DESC"
+        return self.db.execute_query(query, tuple(params), fetch=True)
+
+    def list_quarantined(self, ids: List[int] = None) -> List[Dict]:
+        """已被隔离（迁移到隔离桶）的记录。blocked=2"""
         if ids:
             placeholders = ','.join(['%s'] * len(ids))
             query = f"""
-                SELECT id, bucket_name, object_key, violation_type, confidence
+                SELECT id, bucket_name, object_key, violation_type, confidence, blocked
                 FROM image_scan_records
-                WHERE blocked = 1 AND id IN ({placeholders})
+                WHERE blocked = 2 AND id IN ({placeholders})
             """
             return self.db.execute_query(query, tuple(ids), fetch=True)
 
         return self.db.execute_query(
             """
-            SELECT id, bucket_name, object_key, violation_type, confidence
+            SELECT id, bucket_name, object_key, violation_type, confidence, blocked
             FROM image_scan_records
-            WHERE blocked = 1
+            WHERE blocked = 2
             ORDER BY updated_at DESC
             """,
             fetch=True,
@@ -97,8 +122,38 @@ class ViolationHandler:
 
     # ------------------------------------------------------------------ 操作
 
-    def block(self, records: List[Dict], dry_run: bool = False) -> Dict:
-        """把违规图片从原桶移到隔离桶。"""
+    def mark_private(self, records: List[Dict], dry_run: bool = False) -> Dict:
+        """第一阶段：标记违规图片为私密（隐藏观察，保留在原桶）。"""
+        stats = {'success': 0, 'failed': 0, 'skipped': 0}
+        for i, r in enumerate(records, 1):
+            bucket = r['bucket_name']
+            key = r['object_key']
+
+            if dry_run:
+                logger.info(f"[{i}/{len(records)}] DRY-RUN mark-private: "
+                            f"{bucket}/{key}")
+                stats['success'] += 1
+                continue
+
+            try:
+                if not self.minio.object_exists(bucket, key):
+                    logger.warning(f"[{i}/{len(records)}] 对象不存在，仅标记数据库: "
+                                   f"{bucket}/{key}")
+                    self._mark_private(r['id'])
+                    stats['skipped'] += 1
+                    continue
+
+                self.minio.set_object_private(bucket, key)
+                self._mark_private(r['id'])
+                stats['success'] += 1
+                logger.info(f"[{i}/{len(records)}] mark-private 成功: {bucket}/{key}")
+            except Exception as e:
+                stats['failed'] += 1
+                logger.error(f"[{i}/{len(records)}] mark-private 失败 {bucket}/{key}: {e}")
+        return stats
+
+    def confirm_quarantine(self, records: List[Dict], dry_run: bool = False) -> Dict:
+        """第二阶段-A：观察正常，把 private 图片移到隔离桶。"""
         stats = {'success': 0, 'failed': 0, 'skipped': 0}
         for i, r in enumerate(records, 1):
             src_bucket = r['bucket_name']
@@ -106,34 +161,62 @@ class ViolationHandler:
             dst_key = _quarantine_key(src_bucket, src_key)
 
             if dry_run:
-                logger.info(f"[{i}/{len(records)}] DRY-RUN block: "
+                logger.info(f"[{i}/{len(records)}] DRY-RUN confirm-quarantine: "
                             f"{src_bucket}/{src_key} -> {self.quarantine}/{dst_key}")
                 stats['success'] += 1
                 continue
 
             try:
-                # 源文件已经不存在（之前被人删过）则只更新数据库即可。
                 if not self.minio.object_exists(src_bucket, src_key):
                     logger.warning(f"[{i}/{len(records)}] 源对象不存在，仅标记: "
                                    f"{src_bucket}/{src_key}")
-                    self._mark_blocked(r['id'])
+                    self._mark_quarantined(r['id'])
                     stats['skipped'] += 1
                     continue
 
                 self.minio.move_object(src_bucket, src_key, self.quarantine, dst_key)
-                # 在隔离桶里打个标签做标记（不参与权限控制）。
                 try:
                     self.minio.set_violation_tag(self.quarantine, dst_key,
                                                  violation_type=r.get('violation_type'))
                 except Exception as tag_err:
                     logger.warning(f"  标签写入失败（不影响隔离）: {tag_err}")
 
-                self._mark_blocked(r['id'])
+                self._mark_quarantined(r['id'])
                 stats['success'] += 1
-                logger.info(f"[{i}/{len(records)}] block 成功: {src_bucket}/{src_key}")
+                logger.info(f"[{i}/{len(records)}] confirm-quarantine 成功: {src_bucket}/{src_key}")
             except Exception as e:
                 stats['failed'] += 1
-                logger.error(f"[{i}/{len(records)}] block 失败 {src_bucket}/{src_key}: {e}")
+                logger.error(f"[{i}/{len(records)}] confirm-quarantine 失败 {src_bucket}/{src_key}: {e}")
+        return stats
+
+    def restore_public(self, records: List[Dict], dry_run: bool = False) -> Dict:
+        """第二阶段-B：观察异常，把 private 改回 public（视为误判）。"""
+        stats = {'success': 0, 'failed': 0, 'skipped': 0}
+        for i, r in enumerate(records, 1):
+            bucket = r['bucket_name']
+            key = r['object_key']
+
+            if dry_run:
+                logger.info(f"[{i}/{len(records)}] DRY-RUN restore-public: "
+                            f"{bucket}/{key}")
+                stats['success'] += 1
+                continue
+
+            try:
+                if not self.minio.object_exists(bucket, key):
+                    logger.warning(f"[{i}/{len(records)}] 对象不存在，仅更新数据库: "
+                                   f"{bucket}/{key}")
+                    self._restore_public(r['id'])
+                    stats['skipped'] += 1
+                    continue
+
+                self.minio.set_object_public(bucket, key)
+                self._restore_public(r['id'])
+                stats['success'] += 1
+                logger.info(f"[{i}/{len(records)}] restore-public 成功: {bucket}/{key}")
+            except Exception as e:
+                stats['failed'] += 1
+                logger.error(f"[{i}/{len(records)}] restore-public 失败 {bucket}/{key}: {e}")
         return stats
 
     def restore(self, records: List[Dict], dry_run: bool = False) -> Dict:
@@ -172,7 +255,7 @@ class ViolationHandler:
         return stats
 
     def delete(self, records: List[Dict], dry_run: bool = False) -> Dict:
-        """从隔离桶彻底删除，并清除数据库记录。"""
+        """第三阶段：从隔离桶彻底删除，并清除数据库记录。"""
         stats = {'success': 0, 'failed': 0}
         for i, r in enumerate(records, 1):
             q_key = _quarantine_key(r['bucket_name'], r['object_key'])
@@ -203,13 +286,22 @@ class ViolationHandler:
 
     # ------------------------------------------------------------------ 数据库小工具
 
-    def _mark_blocked(self, record_id: int):
+    def _mark_private(self, record_id: int):
+        """标记为 private（blocked=1）"""
         self.db.execute_query(
             "UPDATE image_scan_records SET blocked = 1, updated_at = NOW() WHERE id = %s",
             (record_id,),
         )
 
-    def _mark_restored(self, record_id: int):
+    def _mark_quarantined(self, record_id: int):
+        """标记为隔离（blocked=2）"""
+        self.db.execute_query(
+            "UPDATE image_scan_records SET blocked = 2, updated_at = NOW() WHERE id = %s",
+            (record_id,),
+        )
+
+    def _restore_public(self, record_id: int):
+        """改回 public，视为误判（blocked=0, is_violation=0）"""
         self.db.execute_query(
             "UPDATE image_scan_records SET blocked = 0, is_violation = 0, "
             "updated_at = NOW() WHERE id = %s",
@@ -249,37 +341,51 @@ def _parse_ids(s: str) -> List[int]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="违规图片处置工具（隔离桶迁移）",
+        description="违规图片处置工具（三阶段工作流）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 工作流示例：
-  python handle_violations.py list                       # 查看所有违规图片
-  python handle_violations.py list --type gambling       # 仅看赌博类
-  python handle_violations.py block --type gambling      # 把赌博类移到隔离桶
-  python handle_violations.py list-blocked               # 查看已隔离清单
-  python handle_violations.py restore --ids 1,2          # 把指定记录移回原桶
-  python handle_violations.py delete --ids 3,4           # 从隔离桶彻底删除
+  ============ 第一阶段：标记为私密（观察期）============
+  python handle_violations.py list                       # 查看新增违规
+  python handle_violations.py mark-private --type gambling     # 标记赌博类为私密
+  python handle_violations.py list-private               # 查看观察中的图片
+
+  ============ 第二阶段：确认后处理 ============
+  python handle_violations.py confirm-quarantine --ids 1,2     # 观察正常 → 隔离
+  python handle_violations.py restore-public --ids 3,4         # 观察异常 → 改为公开
+
+  ============ 第三阶段：彻底删除 ============
+  python handle_violations.py list-quarantined          # 查看隔离的
+  python handle_violations.py delete --ids 5,6          # 从隔离桶彻底删除
 """,
     )
     sub = parser.add_subparsers(dest='command')
 
-    p_list = sub.add_parser('list', help='列出违规图片（尚未隔离的）')
+    p_list = sub.add_parser('list', help='列出未处理的违规图片（blocked=0）')
     p_list.add_argument('--type', help='违规类型过滤')
     p_list.add_argument('--confidence', type=float, default=0.0, help='置信度阈值')
 
-    p_block = sub.add_parser('block', help='把违规图片移到隔离桶')
-    p_block.add_argument('--type', help='违规类型过滤')
-    p_block.add_argument('--confidence', type=float, default=0.0, help='置信度阈值')
-    p_block.add_argument('--ids', help='指定记录 ID，逗号分隔')
-    p_block.add_argument('--dry-run', action='store_true')
+    p_mark_private = sub.add_parser('mark-private', help='标记为私密（第一阶段）')
+    p_mark_private.add_argument('--type', help='违规类型过滤')
+    p_mark_private.add_argument('--confidence', type=float, default=0.0, help='置信度阈值')
+    p_mark_private.add_argument('--ids', help='指定记录 ID，逗号分隔')
+    p_mark_private.add_argument('--dry-run', action='store_true')
 
-    sub.add_parser('list-blocked', help='列出已隔离的图片')
+    p_list_private = sub.add_parser('list-private', help='列出私密观察中的图片（blocked=1）')
+    p_list_private.add_argument('--type', help='违规类型过滤')
+    p_list_private.add_argument('--confidence', type=float, default=0.0, help='置信度阈值')
 
-    p_restore = sub.add_parser('restore', help='从隔离桶恢复到原桶')
-    p_restore.add_argument('--ids', help='指定记录 ID，逗号分隔；省略则恢复全部')
+    p_confirm = sub.add_parser('confirm-quarantine', help='确认隔离（第二阶段-A：观察正常）')
+    p_confirm.add_argument('--ids', help='指定记录 ID，逗号分隔')
+    p_confirm.add_argument('--dry-run', action='store_true')
+
+    p_restore = sub.add_parser('restore-public', help='改回公开（第二阶段-B：观察异常）')
+    p_restore.add_argument('--ids', help='指定记录 ID，逗号分隔')
     p_restore.add_argument('--dry-run', action='store_true')
 
-    p_delete = sub.add_parser('delete', help='从隔离桶彻底删除')
+    p_list_quarantined = sub.add_parser('list-quarantined', help='列出隔离的图片（blocked=2）')
+
+    p_delete = sub.add_parser('delete', help='彻底删除（第三阶段）')
     p_delete.add_argument('--ids', help='指定记录 ID，逗号分隔；省略则删除全部')
     p_delete.add_argument('--dry-run', action='store_true')
 
@@ -292,13 +398,9 @@ def main():
     try:
         if args.command == 'list':
             records = handler.list_violations(args.type, args.confidence)
-            _print_records(records, "违规图片（未隔离）")
+            _print_records(records, "未处理的违规图片（blocked=0）")
 
-        elif args.command == 'list-blocked':
-            records = handler.list_blocked()
-            _print_records(records, "已隔离图片")
-
-        elif args.command == 'block':
+        elif args.command == 'mark-private':
             if args.ids:
                 placeholders = ','.join(['%s'] * len(_parse_ids(args.ids)))
                 records = handler.db.execute_query(
@@ -313,41 +415,68 @@ def main():
             if not records:
                 print("没有符合条件的违规图片")
                 return
+            _print_records(records, "将要标记为私密的图片")
+
+            if args.dry_run:
+                stats = handler.mark_private(records, dry_run=True)
+                print(f"\n[DRY-RUN] 预计成功: {stats['success']}")
+                return
+            if not _confirm(f"\n确认标记 {len(records)} 张图片为私密？"):
+                print("已取消")
+                return
+            stats = handler.mark_private(records)
+            print(f"\n完成 - 成功: {stats['success']} 失败: {stats['failed']} "
+                  f"跳过: {stats['skipped']}")
+
+        elif args.command == 'list-private':
+            records = handler.list_private(args.type, args.confidence)
+            _print_records(records, "私密观察中的图片（blocked=1）")
+
+        elif args.command == 'confirm-quarantine':
+            ids = _parse_ids(args.ids) if args.ids else None
+            records = handler.list_private(ids=ids)
+            if not records:
+                print("没有可隔离的记录")
+                return
             _print_records(records, "将要隔离的图片")
 
             if args.dry_run:
-                stats = handler.block(records, dry_run=True)
+                stats = handler.confirm_quarantine(records, dry_run=True)
                 print(f"\n[DRY-RUN] 预计成功: {stats['success']}")
                 return
             if not _confirm(f"\n确认隔离 {len(records)} 张图片？"):
                 print("已取消")
                 return
-            stats = handler.block(records)
+            stats = handler.confirm_quarantine(records)
             print(f"\n完成 - 成功: {stats['success']} 失败: {stats['failed']} "
                   f"跳过: {stats['skipped']}")
 
-        elif args.command == 'restore':
+        elif args.command == 'restore-public':
             ids = _parse_ids(args.ids) if args.ids else None
-            records = handler.list_blocked(ids=ids)
+            records = handler.list_private(ids=ids)
             if not records:
                 print("没有可恢复的记录")
                 return
-            _print_records(records, "将要恢复的图片")
+            _print_records(records, "将要改为公开的图片")
 
             if args.dry_run:
-                stats = handler.restore(records, dry_run=True)
+                stats = handler.restore_public(records, dry_run=True)
                 print(f"\n[DRY-RUN] 预计成功: {stats['success']}")
                 return
-            if not _confirm(f"\n确认恢复 {len(records)} 张图片到原桶？"):
+            if not _confirm(f"\n确认改为公开 {len(records)} 张图片？"):
                 print("已取消")
                 return
-            stats = handler.restore(records)
+            stats = handler.restore_public(records)
             print(f"\n完成 - 成功: {stats['success']} 失败: {stats['failed']} "
                   f"跳过: {stats['skipped']}")
 
+        elif args.command == 'list-quarantined':
+            records = handler.list_quarantined()
+            _print_records(records, "隔离中的图片（blocked=2）")
+
         elif args.command == 'delete':
             ids = _parse_ids(args.ids) if args.ids else None
-            records = handler.list_blocked(ids=ids)
+            records = handler.list_quarantined(ids=ids)
             if not records:
                 print("没有可删除的记录")
                 return
