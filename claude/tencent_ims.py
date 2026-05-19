@@ -146,17 +146,17 @@ class TencentIMSScanner:
             if result['suggestion'] in ['Block', 'Review']:
                 result['is_violation'] = True
 
-            # resp.Label 是字符串（如 "Porn"），不是对象
-            if hasattr(resp, 'Label') and resp.Label:
+            # resp.Label 是字符串（如 "Porn"），"Normal" 表示正常，不写入违规字段
+            if hasattr(resp, 'Label') and resp.Label and resp.Label != 'Normal':
                 result['violation_label'] = resp.Label
                 result['violation_type'] = self.VIOLATION_TYPE_MAP.get(resp.Label, 'other')
 
-            # 子标签作为描述
+            # 子标签作为描述（仅违规时有意义）
             if hasattr(resp, 'SubLabel') and resp.SubLabel:
                 result['violation_description'] = resp.SubLabel
 
-            # Score 是 0-100 整数，归一化到 0-1
-            if hasattr(resp, 'Score') and resp.Score is not None:
+            # Score 是 0-100 整数，归一化到 0-1；仅违规时存置信度
+            if result['is_violation'] and hasattr(resp, 'Score') and resp.Score is not None:
                 result['confidence'] = resp.Score / 100.0
 
             # 保存原始结果

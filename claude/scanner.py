@@ -176,6 +176,13 @@ class ImageSecurityScanner:
           1. matched_by=ims_api  → 从 raw_result 重新解析 Label/Score/SubLabel
           2. matched_by=content/similar → 从来源记录复制 violation 字段
         """
+        # 同时清理 is_violation=0 但被旧 bug 写入了 violation_type/label 的脏数据
+        self.db.execute_query(
+            "UPDATE image_scan_records SET violation_type=NULL, violation_label=NULL, "
+            "violation_description=NULL, confidence=NULL, updated_at=NOW() "
+            "WHERE is_violation = 0 AND violation_type IS NOT NULL",
+        )
+
         total = self.db.execute_query(
             "SELECT COUNT(*) AS c FROM image_scan_records "
             "WHERE is_violation = 1 AND violation_type IS NULL",
