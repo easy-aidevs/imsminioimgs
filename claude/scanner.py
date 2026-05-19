@@ -17,7 +17,6 @@ from minio_client import MinIOClient
 from image_feature import ImageFeatureExtractor
 from tencent_ims import TencentIMSScanner
 from database import ImageDatabase
-import fix_violation_records
 
 logger = setup_logger(log_dir="logs")
 
@@ -168,6 +167,106 @@ class ImageSecurityScanner:
         similar_list = sorted(merged.values(), key=lambda x: x['hash_distance'])
         return similar_list[:10]
 
+    # ------------------------------------------------------------------ 历史数据修复
+
+    def _fix_historical_records(self):
+        """修复旧版解析 bug 遗留的 violation_type=NULL 记录，扫描前自动执行。
+
+        两轮：
+          1. matched_by=ims_api  → 从 raw_result 重新解析 Label/Score/SubLabel
+          2. matched_by=content/similar → 从来源记录复制 violation 字段
+        """
+        total = self.db.execute_query(
+            "SELECT COUNT(*) AS c FROM image_scan_records "
+            "WHERE is_violation = 1 AND violation_type IS NULL",
+            fetch=True,
+        )[0]['c']
+
+        if not total:
+            return
+
+        logger.info(f"前置修复：发现 {total} 条 violation_type=NULL，开始修复...")
+        vmap = self.ims.VIOLATION_TYPE_MAP
+
+        # 第一轮：ims_api 记录
+        rows = self.db.execute_query(
+            """
+            SELECT id, ims_result FROM image_scan_records
+            WHERE is_violation = 1 AND violation_type IS NULL
+              AND ims_result IS NOT NULL
+              AND JSON_UNQUOTE(JSON_EXTRACT(ims_result, '$.matched_by')) = 'ims_api'
+            """,
+            fetch=True,
+        )
+        n1 = 0
+        for row in rows:
+            try:
+                ims = row['ims_result']
+                if isinstance(ims, str):
+                    import json as _json
+                    ims = _json.loads(ims)
+                raw = ims.get('raw_result', {})
+                label = raw.get('Label') or raw.get('label')
+                score = raw.get('Score') if raw.get('Score') is not None else raw.get('score')
+                sub_label = raw.get('SubLabel') or raw.get('subLabel')
+                if not label:
+                    continue
+                self.db.execute_query(
+                    "UPDATE image_scan_records SET violation_type=%s, violation_label=%s, "
+                    "violation_description=%s, confidence=%s, updated_at=NOW() WHERE id=%s",
+                    (vmap.get(label, 'other'), label, sub_label,
+                     round(score / 100.0, 4) if score is not None else None,
+                     row['id']),
+                )
+                n1 += 1
+            except Exception as e:
+                logger.warning(f"前置修复 id={row['id']} 失败: {e}")
+
+        # 第二轮：content/similar 复用记录
+        rows = self.db.execute_query(
+            """
+            SELECT id, ims_result FROM image_scan_records
+            WHERE is_violation = 1 AND violation_type IS NULL
+              AND ims_result IS NOT NULL
+              AND JSON_UNQUOTE(JSON_EXTRACT(ims_result, '$.matched_by')) IN ('content', 'similar')
+            """,
+            fetch=True,
+        )
+        n2 = 0
+        for row in rows:
+            try:
+                ims = row['ims_result']
+                if isinstance(ims, str):
+                    import json as _json
+                    ims = _json.loads(ims)
+                src_bucket = ims.get('source_bucket')
+                src_key = ims.get('source_object_key')
+                if not src_bucket or not src_key:
+                    continue
+                sources = self.db.execute_query(
+                    "SELECT violation_type, violation_label, violation_description, confidence "
+                    "FROM image_scan_records WHERE bucket_name=%s AND object_key=%s "
+                    "AND violation_type IS NOT NULL LIMIT 1",
+                    (src_bucket, src_key),
+                    fetch=True,
+                )
+                if not sources:
+                    continue
+                src = sources[0]
+                self.db.execute_query(
+                    "UPDATE image_scan_records SET violation_type=%s, violation_label=%s, "
+                    "violation_description=%s, confidence=%s, updated_at=NOW() WHERE id=%s",
+                    (src['violation_type'], src['violation_label'],
+                     src['violation_description'], src['confidence'], row['id']),
+                )
+                n2 += 1
+            except Exception as e:
+                logger.warning(f"前置修复 id={row['id']} 失败: {e}")
+
+        remaining = total - n1 - n2
+        logger.info(f"前置修复完成：ims_api={n1} content/similar={n2} "
+                    f"剩余无法修复={remaining}")
+
     # ------------------------------------------------------------------ 主循环
 
     def scan_all(self, bucket_name: str = None, prefix: str = "",
@@ -175,6 +274,8 @@ class ImageSecurityScanner:
         bucket = bucket_name or self.config['minio'].get('bucket_name')
         if not bucket:
             raise ValueError("必须指定 bucket_name")
+
+        self._fix_historical_records()
 
         logger.info(f"开始扫描 bucket={bucket} prefix={prefix or '(无)'} "
                     f"force={force_rescan} limit={limit or '(无)'}")
@@ -445,12 +546,6 @@ def load_config() -> Dict:
 def main():
     try:
         config = load_config()
-
-        # 前置修复：修复历史记录中因旧版解析 bug 导致的 violation_type=NULL
-        try:
-            fix_violation_records.main()
-        except Exception as fix_err:
-            logger.warning(f"前置修复跳过（不影响扫描）: {fix_err}")
 
         with ImageSecurityScanner(config) as scanner:
             scanner.scan_all(
