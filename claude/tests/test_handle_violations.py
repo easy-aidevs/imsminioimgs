@@ -55,16 +55,16 @@ def handler():
         yield h
 
 
-class TestBlock:
-    """block：原桶 → 隔离桶 + 打 tag + 数据库 blocked=1。"""
+class TestConfirmQuarantine:
+    """confirm_quarantine：原桶 → 隔离桶 + 打 tag + 数据库 blocked=2。"""
 
-    def test_block_happy_path(self, handler):
+    def test_confirm_quarantine_happy_path(self, handler):
         handler.minio.object_exists.return_value = True
         records = [{
             'id': 1, 'bucket_name': 'images', 'object_key': 'bad.jpg',
-            'violation_type': 'gambling',
+            'violation_type': 'Gambling',
         }]
-        stats = handler.block(records, dry_run=False)
+        stats = handler.confirm_quarantine(records, dry_run=False)
 
         assert stats == {'success': 1, 'failed': 0, 'skipped': 0}
         # 调用顺序：检查存在 → move_object → set_violation_tag → DB 更新
@@ -72,45 +72,45 @@ class TestBlock:
             'images', 'bad.jpg', handler.quarantine, 'images/bad.jpg'
         )
         handler.minio.set_violation_tag.assert_called_once()
-        # 数据库 blocked = 1
+        # 数据库 blocked = 2
         update_call = handler.db.execute_query.call_args_list[-1]
-        assert "blocked = 1" in update_call[0][0]
+        assert "blocked = 2" in update_call[0][0]
         assert update_call[0][1] == (1,)
 
-    def test_block_source_missing_marks_only(self, handler):
+    def test_confirm_quarantine_source_missing_marks_only(self, handler):
         """源文件已不存在时，只标记数据库不做迁移。"""
         handler.minio.object_exists.return_value = False
         records = [{'id': 1, 'bucket_name': 'images', 'object_key': 'gone.jpg',
-                    'violation_type': 'porn'}]
-        stats = handler.block(records, dry_run=False)
+                    'violation_type': 'Porn'}]
+        stats = handler.confirm_quarantine(records, dry_run=False)
         assert stats == {'success': 0, 'failed': 0, 'skipped': 1}
         handler.minio.move_object.assert_not_called()
         handler.minio.set_violation_tag.assert_not_called()
 
-    def test_block_dry_run_does_not_call_minio(self, handler):
+    def test_confirm_quarantine_dry_run_does_not_call_minio(self, handler):
         records = [{'id': 1, 'bucket_name': 'images', 'object_key': 'bad.jpg',
-                    'violation_type': 'gambling'}]
-        handler.block(records, dry_run=True)
+                    'violation_type': 'Gambling'}]
+        handler.confirm_quarantine(records, dry_run=True)
         handler.minio.move_object.assert_not_called()
         handler.minio.set_violation_tag.assert_not_called()
         handler.db.execute_query.assert_not_called()
 
-    def test_block_tag_failure_does_not_fail_block(self, handler):
-        """打标签失败仅警告，不应让整个 block 失败（隔离已完成）。"""
+    def test_confirm_quarantine_tag_failure_does_not_fail(self, handler):
+        """打标签失败仅警告，不应让整个隔离失败（迁移已完成）。"""
         handler.minio.object_exists.return_value = True
         handler.minio.set_violation_tag.side_effect = RuntimeError("tag service down")
         records = [{'id': 1, 'bucket_name': 'b', 'object_key': 'k.jpg',
-                    'violation_type': 'porn'}]
-        stats = handler.block(records, dry_run=False)
+                    'violation_type': 'Porn'}]
+        stats = handler.confirm_quarantine(records, dry_run=False)
         assert stats['success'] == 1
 
-    def test_block_move_failure_no_db_update(self, handler):
-        """移动失败时数据库不应被标记为 blocked。"""
+    def test_confirm_quarantine_move_failure_no_db_update(self, handler):
+        """移动失败时数据库不应被标记为 quarantined。"""
         handler.minio.object_exists.return_value = True
         handler.minio.move_object.side_effect = RuntimeError("network error")
         records = [{'id': 1, 'bucket_name': 'b', 'object_key': 'k.jpg',
-                    'violation_type': 'porn'}]
-        stats = handler.block(records, dry_run=False)
+                    'violation_type': 'Porn'}]
+        stats = handler.confirm_quarantine(records, dry_run=False)
         assert stats == {'success': 0, 'failed': 1, 'skipped': 0}
         # 数据库没有 UPDATE 调用
         handler.db.execute_query.assert_not_called()

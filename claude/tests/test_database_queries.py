@@ -46,9 +46,9 @@ class TestFindSimilarScannedDefensiveFilter:
 
 
 class TestUpsertRecord:
-    """upsert_record 字段映射：22 列对 22 占位符，所有 NOT NULL 字段都被提供。"""
+    """upsert_record 字段映射：24 列对 24 占位符，所有 NOT NULL 字段都被提供。"""
 
-    def test_insert_has_22_placeholders(self, db):
+    def test_insert_has_24_placeholders(self, db):
         db.upsert_record({
             'key': 'abc-123',
             'feature_hash': 'phash1',
@@ -61,8 +61,8 @@ class TestUpsertRecord:
         params = cursor.execute.call_args[0][1]
         # INSERT 段的占位符数量
         insert_section = sql.split("ON DUPLICATE")[0]
-        assert insert_section.count("%s") == 22
-        assert len(params) == 22
+        assert insert_section.count("%s") == 24
+        assert len(params) == 24
 
     def test_blocked_default_zero(self, db):
         """没传 blocked 字段时，默认值是 0，避免插入 NULL。"""
@@ -72,11 +72,12 @@ class TestUpsertRecord:
         })
         cursor = db.connection.cursor.return_value
         params = cursor.execute.call_args[0][1]
-        # blocked 是第 16 个参数（按 INSERT 字段顺序）
-        # key, feature_hash, dhash, ahash, phash, bucket_name, object_key, file_size,
-        # content_type, is_violation, violation_type, violation_label,
-        # violation_description, confidence, suggestion, blocked, ...
-        assert params[15] == 0
+        # key(0), feature_hash(1), dhash(2), ahash(3), phash(4),
+        # bucket_name(5), object_key(6), file_size(7), content_type(8),
+        # is_violation(9), violation_type(10), violation_label(11),
+        # violation_label_cn(12), sub_label(13), sub_label_cn(14),
+        # confidence(15), suggestion(16), blocked(17), ...
+        assert params[17] == 0
 
     def test_ims_result_json_serialized(self, db):
         """dict 类型的 ims_result 应该被 json.dumps 成字符串。"""
@@ -87,8 +88,8 @@ class TestUpsertRecord:
         })
         cursor = db.connection.cursor.return_value
         params = cursor.execute.call_args[0][1]
-        # ims_result 是第 17 个参数
-        ims_param = params[16]
+        # ims_result 是 index 18（0-based）
+        ims_param = params[18]
         assert isinstance(ims_param, str)
         assert 'matched_by' in ims_param
 

@@ -26,7 +26,7 @@ def scanner():
         s.features.extract_features.return_value = {
             'phash': 'p1', 'dhash': 'd1', 'ahash': 'a1',
         }
-        s.minio.get_object_data.return_value = b"fake image bytes"
+        s.minio.get_object_data.return_value = (b"fake image bytes", {'content_type': 'image/jpeg'})
         yield s
 
 
@@ -42,7 +42,7 @@ class TestProcessOneLayer1PathDedup:
         scanner.minio.get_object_data.assert_not_called()
         # 不应该调 IMS
         scanner.ims.scan_image.assert_not_called()
-        assert scanner.stats['skipped'] == 1
+        assert scanner.stats['path_reused'] == 1
         assert scanner.stats['scanned'] == 0
 
     def test_path_dedup_counts_violation(self, scanner):
@@ -84,7 +84,7 @@ class TestProcessOneLayer2ContentDedup:
         assert record['object_key'] == 'new_path.jpg'  # 新路径
         assert record['is_violation'] == 1             # 复用结果
         assert record['ims_result']['matched_by'] == 'content'
-        assert scanner.stats['skipped'] == 1
+        assert scanner.stats['content_reused'] == 1
 
 
 class TestProcessOneLayer3Similarity:
@@ -94,8 +94,9 @@ class TestProcessOneLayer3Similarity:
         scanner.db.find_by_bucket_object.return_value = None
         scanner.db.find_by_key.return_value = None
         scanner.db.find_similar_scanned.return_value = [{
+            'key': 'similar-key-abc',
             'bucket_name': 'b', 'object_key': 'similar.jpg',
-            'is_violation': 1, 'violation_type': 'porn',
+            'is_violation': 1, 'violation_type': 'Porn',
             'confidence': 0.9, 'suggestion': 'Block',
             'hash_distance': 0,
         }]
@@ -103,13 +104,14 @@ class TestProcessOneLayer3Similarity:
 
         scanner.ims.scan_image.assert_not_called()
         assert scanner.stats['api_saved'] == 1
-        assert scanner.stats['scanned'] == 1
+        assert scanner.stats['scanned'] == 0
 
     def test_distance_3_reuses_result(self, scanner):
         """边界值：距离 == 3 仍属于"高度相似"。"""
         scanner.db.find_by_bucket_object.return_value = None
         scanner.db.find_by_key.return_value = None
         scanner.db.find_similar_scanned.return_value = [{
+            'key': 'similar-key-abc',
             'bucket_name': 'b', 'object_key': 'similar.jpg',
             'is_violation': 0, 'hash_distance': 3,
         }]
@@ -122,6 +124,7 @@ class TestProcessOneLayer3Similarity:
         scanner.db.find_by_bucket_object.return_value = None
         scanner.db.find_by_key.return_value = None
         scanner.db.find_similar_scanned.return_value = [{
+            'key': 'similar-key-abc',
             'bucket_name': 'b', 'object_key': 'similar.jpg',
             'is_violation': 0, 'hash_distance': 4,
         }]
