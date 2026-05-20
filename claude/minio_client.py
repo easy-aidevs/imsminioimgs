@@ -106,26 +106,6 @@ class MinIOClient:
         self.client.remove_object(bucket_name, object_name)
         logger.debug(f"删除对象: {bucket_name}/{object_name}")
 
-    # ------------------------------------------------------------------ 权限控制
-
-    def set_object_private(self, bucket_name: str, object_name: str):
-        """标记对象为私密（应用层标记，不是 MinIO 访问控制）。
-
-        MinIO 不支持单个对象 ACL；真正的访问隔离通过 confirm_quarantine 移桶实现。
-        此方法仅打 tag 作为观察期标记，供应用层/CDN 判断是否拦截。
-        """
-        tags = Tags.new_object_tags()
-        tags["visibility"] = "private"
-        self.client.set_object_tags(bucket_name, object_name, tags)
-        logger.debug(f"已标记为私密(tag): {bucket_name}/{object_name}")
-
-    def set_object_public(self, bucket_name: str, object_name: str):
-        """恢复对象为公开标记（应用层标记）。"""
-        tags = Tags.new_object_tags()
-        tags["visibility"] = "public"
-        self.client.set_object_tags(bucket_name, object_name, tags)
-        logger.debug(f"已标记为公开(tag): {bucket_name}/{object_name}")
-
     # ------------------------------------------------------------------ 标签（仅用于标记）
 
     def set_violation_tag(self, bucket_name: str, object_name: str,

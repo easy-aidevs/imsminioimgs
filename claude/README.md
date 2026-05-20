@@ -34,7 +34,7 @@
         │
         ├─→ list               查看新增违规
         │
-        ├─→ mark-private       标记为私密（原桶，无法访问）
+        ├─→ mark-private       标记为私密（数据库 blocked=1，应用层拦截）
         │                      ↓
         │                   [观察期 24-48 小时]
         │                   [监控业务日志]
@@ -66,7 +66,7 @@
 ```
 
 **核心机制：**
-- **私密状态**（blocked=1）：原桶中的对象，通过 MinIO 权限无法公开访问，但仍可随时恢复
+- **私密状态**（blocked=1）：原桶中的对象，数据库标记 `blocked=1`；MinIO 不支持单对象 ACL，**由应用层检查 blocked 字段拦截访问**，仍可随时恢复
 - **隔离状态**（blocked=2）：对象移入隔离桶，只能删除，不可恢复
 - **观察期**：充分验证后再确认隔离，降低误判风险
 
@@ -90,7 +90,7 @@ python scanner.py
 
 # 第一阶段：标记为私密
 python handle_violations.py list                                  # 查看新增违规
-python handle_violations.py mark-private --sub-label Gambling     # 标记赌博图片为私密
+python handle_violations.py mark-private --sub-label Gamble       # 标记赌博图片为私密
 
 # 第二阶段：观察并决策
 python handle_violations.py list-private                          # 查看观察中的
@@ -128,15 +128,17 @@ Docker 部署：`docker-compose up`
   `Polity`（政治）/ `Porn`（色情）/ `Sexy`（性感）/ `Terror`（暴恐）/ `Illegal`（违法）/ `Religion`（宗教识别）/ `Ad`（广告）/ `Teenager`（未成年识别）/ `Abuse`（谩骂）
 
 - **`sub_label`**（二级 SubLabel）：精细子类，直接取 IMS 返回的原始字符串，如：
-  `Gambling`（赌博）/ `SexyBehavior`（性行为）/ `NationalOfficial`（国家公职人员）/ `Drug`（毒品）/ `Blood`（血腥）/ `QrCode`（二维码）等
+  `Gamble`（赌博）/ `SexyBehavior`（性行为）/ `NationalOfficial`（国家公职人员）/ `Drug`（毒品）/ `Blood`（血腥）/ `QrCode`（二维码）等
 
-- **`violation_type`**：直接取 `sub_label`（如 `Gambling`）；若 SubLabel 为空则取 `violation_label`（如 `Porn`）。
+- **`violation_type`**：直接取 `sub_label`（如 `Gamble`）；若 SubLabel 为空则取 `violation_label`（如 `Porn`）。
   无自定义映射，无 `other` 类型，完全使用 IMS API 返回的原始值。
+
+> **提示**：SubLabel 值直接来自 IMS API，过滤前请先用 `list` 命令查看实际的 `violation_type` / `sub_label` 值。
 
 **过滤示例**：
 - 过滤所有违法内容：`--label Illegal`
-- 过滤赌博内容：`--sub-label Gambling`
-- 按 violation_type 过滤：`--type Gambling`（与 sub_label 相同）
+- 过滤赌博内容：`--sub-label Gamble`
+- 按 violation_type 过滤：`--type Gamble`（与 sub_label 相同）
 
 ## 三层去重（节省 API 费用）
 

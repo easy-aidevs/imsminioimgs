@@ -150,7 +150,11 @@ class ViolationHandler:
     # ------------------------------------------------------------------ 操作
 
     def mark_private(self, records: List[Dict], dry_run: bool = False) -> Dict:
-        """第一阶段：标记违规图片为私密（隐藏观察，保留在原桶）。"""
+        """第一阶段：标记违规图片为私密（仅更新数据库 blocked=1）。
+
+        MinIO 不支持单个对象级 ACL，"私密"状态由数据库 blocked=1 管理。
+        应用层在对外提供图片 URL / 代理下载时，须检查 blocked 字段并拒绝服务。
+        """
         stats = {'success': 0, 'failed': 0, 'skipped': 0}
         for i, r in enumerate(records, 1):
             bucket = r['bucket_name']
@@ -163,14 +167,6 @@ class ViolationHandler:
                 continue
 
             try:
-                if not self.minio.object_exists(bucket, key):
-                    logger.warning(f"[{i}/{len(records)}] 对象不存在，仅标记数据库: "
-                                   f"{bucket}/{key}")
-                    self._mark_private(r['id'])
-                    stats['skipped'] += 1
-                    continue
-
-                self.minio.set_object_private(bucket, key)
                 self._mark_private(r['id'])
                 stats['success'] += 1
                 logger.info(f"[{i}/{len(records)}] mark-private 成功: {bucket}/{key}")
@@ -217,7 +213,7 @@ class ViolationHandler:
         return stats
 
     def restore_public(self, records: List[Dict], dry_run: bool = False) -> Dict:
-        """第二阶段-B：观察异常，把 private 改回 public（视为误判）。"""
+        """第二阶段-B：观察异常，把 private 改回 public（视为误判，仅更新数据库 blocked=0）。"""
         stats = {'success': 0, 'failed': 0, 'skipped': 0}
         for i, r in enumerate(records, 1):
             bucket = r['bucket_name']
@@ -230,14 +226,6 @@ class ViolationHandler:
                 continue
 
             try:
-                if not self.minio.object_exists(bucket, key):
-                    logger.warning(f"[{i}/{len(records)}] 对象不存在，仅更新数据库: "
-                                   f"{bucket}/{key}")
-                    self._restore_public(r['id'])
-                    stats['skipped'] += 1
-                    continue
-
-                self.minio.set_object_public(bucket, key)
                 self._restore_public(r['id'])
                 stats['success'] += 1
                 logger.info(f"[{i}/{len(records)}] restore-public 成功: {bucket}/{key}")
