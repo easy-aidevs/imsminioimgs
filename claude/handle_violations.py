@@ -16,6 +16,7 @@
 
 import argparse
 import os
+from datetime import datetime
 from typing import Dict, List
 
 from dotenv import load_dotenv
@@ -98,37 +99,42 @@ class ViolationHandler:
         query += " ORDER BY violation_label, sub_label, confidence DESC"
         return self.db.execute_query(query, tuple(params), fetch=True)
 
-    def list_quarantined(self, ids: List[int] = None) -> List[Dict]:
+    def list_quarantined(self, ids: List[int] = None, batch_id: str = None) -> List[Dict]:
         """已被隔离（迁移到隔离桶）的记录。blocked=2"""
+        conditions = ["blocked = 2"]
+        params: list = []
+
         if ids:
             placeholders = ','.join(['%s'] * len(ids))
-            query = f"""
-                SELECT id, bucket_name, object_key, violation_type,
-                       violation_label_cn, sub_label_cn, confidence, suggestion, blocked
-                FROM image_scan_records
-                WHERE blocked = 2 AND id IN ({placeholders})
-            """
-            return self.db.execute_query(query, tuple(ids), fetch=True)
+            conditions.append(f"id IN ({placeholders})")
+            params.extend(ids)
+        if batch_id:
+            conditions.append("quarantine_batch_id = %s")
+            params.append(batch_id)
 
-        return self.db.execute_query(
-            """
+        where = " AND ".join(conditions)
+        query = f"""
             SELECT id, bucket_name, object_key, violation_type,
-                   violation_label_cn, sub_label_cn, confidence, suggestion, blocked
+                   violation_label_cn, sub_label_cn, confidence, suggestion, blocked,
+                   quarantine_batch_id
             FROM image_scan_records
-            WHERE blocked = 2
+            WHERE {where}
             ORDER BY updated_at DESC
-            """,
-            fetch=True,
-        )
+        """
+        return self.db.execute_query(query, tuple(params) if params else None, fetch=True)
 
     # ------------------------------------------------------------------ 操作
 
-    def quarantine(self, records: List[Dict], dry_run: bool = False) -> Dict:
+    def quarantine(self, records: List[Dict], dry_run: bool = False,
+                   batch_id: str = None) -> Dict:
         """将违规图片从原桶移入隔离桶（MinIO 层物理隔离，原 URL 立即失效）。
 
         适用于 blocked=0 或旧版 blocked=1 的记录（两者均在原桶）。
+        batch_id 由调用方传入（手动指定）或留空（自动生成时间戳）。
         """
-        stats = {'success': 0, 'failed': 0, 'skipped': 0}
+        if batch_id is None:
+            batch_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+        stats = {'success': 0, 'failed': 0, 'skipped': 0, 'batch_id': batch_id}
         for i, r in enumerate(records, 1):
             src_bucket = r['bucket_name']
             src_key = r['object_key']
@@ -144,7 +150,7 @@ class ViolationHandler:
                 if not self.minio.object_exists(src_bucket, src_key):
                     logger.warning(f"[{i}/{len(records)}] 源对象不存在，仅标记: "
                                    f"{src_bucket}/{src_key}")
-                    self._mark_quarantined(r['id'])
+                    self._mark_quarantined(r['id'], batch_id)
                     stats['skipped'] += 1
                     continue
 
@@ -155,7 +161,7 @@ class ViolationHandler:
                 except Exception as tag_err:
                     logger.warning(f"  标签写入失败（不影响隔离）: {tag_err}")
 
-                self._mark_quarantined(r['id'])
+                self._mark_quarantined(r['id'], batch_id)
                 stats['success'] += 1
                 logger.info(f"[{i}/{len(records)}] quarantine 成功: {src_bucket}/{src_key}")
             except Exception as e:
@@ -230,10 +236,10 @@ class ViolationHandler:
 
     # ------------------------------------------------------------------ 数据库小工具
 
-    def _mark_quarantined(self, record_id: int):
+    def _mark_quarantined(self, record_id: int, batch_id: str = None):
         self.db.execute_query(
-            "UPDATE image_scan_records SET blocked = 2, updated_at = NOW() WHERE id = %s",
-            (record_id,),
+            "UPDATE image_scan_records SET blocked = 2, quarantine_batch_id = %s, updated_at = NOW() WHERE id = %s",
+            (batch_id, record_id),
         )
 
     def _mark_restored(self, record_id: int):
@@ -258,17 +264,25 @@ def _print_records(records: List[Dict], title: str):
     if not records:
         print(f"\n{title}：无")
         return
+    has_batch = any(r.get('quarantine_batch_id') for r in records)
     print(f"\n{title}（共 {len(records)} 条）")
-    print(f"{'ID':<6} {'violation_type':<16} {'suggestion':<10} {'label_cn':<10} {'sub_label_cn':<20} {'置信度':<8} 路径")
-    print("-" * 120)
+    header = f"{'ID':<6} {'violation_type':<16} {'suggestion':<10} {'label_cn':<10} {'sub_label_cn':<20} {'置信度':<8}"
+    if has_batch:
+        header += f" {'批次ID':<18}"
+    header += " 路径"
+    print(header)
+    print("-" * (140 if has_batch else 120))
     for r in records[:50]:
         conf = r.get('confidence') or 0
         vtype = r.get('violation_type') or '-'
         suggestion = r.get('suggestion') or '-'
         label_cn = r.get('violation_label_cn') or r.get('violation_label') or '-'
         sub_cn = r.get('sub_label_cn') or r.get('sub_label') or '-'
-        print(f"{r['id']:<6} {vtype:<16} {suggestion:<10} {label_cn:<10} {sub_cn:<20} {conf:<8.2f} "
-              f"{r['bucket_name']}/{r['object_key']}")
+        line = f"{r['id']:<6} {vtype:<16} {suggestion:<10} {label_cn:<10} {sub_cn:<20} {conf:<8.2f}"
+        if has_batch:
+            line += f" {(r.get('quarantine_batch_id') or '-'):<18}"
+        line += f" {r['bucket_name']}/{r['object_key']}"
+        print(line)
     if len(records) > 50:
         print(f"... 还有 {len(records) - 50} 条未显示")
 
@@ -296,14 +310,18 @@ def main():
   python handle_violations.py list --confidence 0.9                    # 只看高置信度
 
   ============ 第二步：隔离（MinIO 物理移入隔离桶）============
-  python handle_violations.py quarantine --suggestion Block            # 直接隔离 IMS 建议拦截的
-  python handle_violations.py quarantine --suggestion Block --label Illegal  # 按分类过滤
+  python handle_violations.py quarantine --suggestion Block            # 自动批次ID
+  python handle_violations.py quarantine --suggestion Block --batch gamble_20260520  # 手动批次ID
   python handle_violations.py quarantine --ids 1,2,3                   # 按 ID 隔离
   python handle_violations.py quarantine --ids 1,2,3 --dry-run         # 预演（不实际执行）
 
   ============ 查看隔离 / 误判恢复 / 彻底删除 ============
-  python handle_violations.py list-quarantined                         # 查看已隔离的
-  python handle_violations.py restore --ids 3,4                        # 误判恢复（移回原桶）
+  python handle_violations.py list-quarantined                         # 查看已隔离的（含批次ID）
+  python handle_violations.py list-quarantined --batch 20260520_143022 # 查看某批次
+  python handle_violations.py restore --ids 3,4                        # 按 ID 恢复（输入 yes 确认）
+  python handle_violations.py restore --batch 20260520_143022          # 按批次恢复（输入批次ID二次确认）
+  python handle_violations.py restore --all                            # 恢复全部（输入 RESTORE-ALL 确认）
+  python handle_violations.py restore --batch 20260520_143022 --dry-run  # 预演批次恢复
   python handle_violations.py delete --ids 1,2 --dry-run               # 预演删除
   python handle_violations.py delete --ids 1,2                         # 彻底删除（输入 DELETE 确认）
 """,
@@ -327,14 +345,19 @@ def main():
     p_quarantine.add_argument('--sub-label', dest='sub_label', help='IMS 原始 SubLabel 过滤')
     p_quarantine.add_argument('--label', dest='violation_label', help='IMS 一级 Label 过滤')
     p_quarantine.add_argument('--confidence', type=float, default=0.0, help='置信度阈值')
+    p_quarantine.add_argument('--batch', dest='batch_id',
+                              help='手动指定批次ID（留空则自动生成时间戳，如 20260520_143022）')
     p_quarantine.add_argument('--dry-run', action='store_true', help='预演，不实际执行')
 
     # list-quarantined
-    sub.add_parser('list-quarantined', help='列出已隔离的图片（blocked=2）')
+    p_lq = sub.add_parser('list-quarantined', help='列出已隔离的图片（blocked=2）')
+    p_lq.add_argument('--batch', help='按批次ID过滤')
 
     # restore
     p_restore = sub.add_parser('restore', help='误判恢复：从隔离桶移回原桶，标记为非违规')
-    p_restore.add_argument('--ids', required=True, help='指定记录 ID，逗号分隔（必填）')
+    p_restore.add_argument('--ids', help='指定记录 ID，逗号分隔')
+    p_restore.add_argument('--batch', help='按批次ID恢复（quarantine 时打印的批次ID）')
+    p_restore.add_argument('--all', dest='restore_all', action='store_true', help='恢复全部已隔离记录')
     p_restore.add_argument('--dry-run', action='store_true', help='预演，不实际执行')
 
     # delete
@@ -372,36 +395,79 @@ def main():
                 return
             _print_records(records, "将要隔离的图片")
 
+            # 批次ID：手动指定或自动生成（预演时展示预览值）
+            manual_batch = getattr(args, 'batch_id', None)
+            if manual_batch:
+                print(f"\n批次ID（手动指定）：{manual_batch}")
+            else:
+                print(f"\n批次ID：自动生成（执行后打印实际值）")
+
             if args.dry_run:
-                stats = handler.quarantine(records, dry_run=True)
-                print(f"\n[DRY-RUN] 预计成功: {stats['success']}")
+                preview_batch = manual_batch or datetime.now().strftime('%Y%m%d_%H%M%S') + '_preview'
+                stats = handler.quarantine(records, dry_run=True, batch_id=preview_batch)
+                print(f"\n[DRY-RUN] 预计成功: {stats['success']}  批次ID预览: {stats['batch_id']}")
                 return
-            if not _confirm(f"\n确认隔离 {len(records)} 张图片（MinIO 层物理移动，原 URL 失效）？"):
-                print("已取消")
-                return
-            stats = handler.quarantine(records)
+
+            if manual_batch:
+                if not _confirm(f"\n确认以批次ID [{manual_batch}] 隔离 {len(records)} 张图片"
+                                f"（MinIO 层物理移动，原 URL 失效）"):
+                    print("已取消")
+                    return
+            else:
+                if not _confirm(f"\n确认隔离 {len(records)} 张图片（MinIO 层物理移动，原 URL 失效）"):
+                    print("已取消")
+                    return
+
+            stats = handler.quarantine(records, batch_id=manual_batch)
             print(f"\n完成 - 成功: {stats['success']} 失败: {stats['failed']} "
-                  f"跳过: {stats['skipped']}")
+                  f"跳过: {stats['skipped']}  批次ID: {stats['batch_id']}")
 
         elif args.command == 'list-quarantined':
-            records = handler.list_quarantined()
+            records = handler.list_quarantined(batch_id=args.batch if args.batch else None)
             _print_records(records, "已隔离的图片（隔离桶）")
 
         elif args.command == 'restore':
-            ids = _parse_ids(args.ids)
-            records = handler.list_quarantined(ids=ids)
+            if not args.ids and not args.batch and not args.restore_all:
+                print("请指定 --ids <ID列表>、--batch <批次ID> 或 --all 之一")
+                return
+            ids = _parse_ids(args.ids) if args.ids else None
+            records = handler.list_quarantined(ids=ids, batch_id=args.batch if args.batch else None)
             if not records:
-                print("没有可恢复的记录（请确认 ID 且状态为已隔离）")
+                print("没有可恢复的记录（请确认 ID/批次ID 且状态为已隔离）")
                 return
-            _print_records(records, "将要恢复到原桶的图片（视为误判）")
 
-            if args.dry_run:
-                stats = handler.restore(records, dry_run=True)
-                print(f"\n[DRY-RUN] 预计成功: {stats['success']}")
-                return
-            if not _confirm(f"\n确认恢复 {len(records)} 张图片到原桶？"):
-                print("已取消")
-                return
+            if args.batch:
+                _print_records(records, f"将要恢复到原桶的图片（视为误判）— 批次 {args.batch}")
+                if args.dry_run:
+                    stats = handler.restore(records, dry_run=True)
+                    print(f"\n[DRY-RUN] 预计成功: {stats['success']}")
+                    return
+                print(f"\n⚠  即将恢复批次 [{args.batch}] 的 {len(records)} 张图片到原桶（不可撤销）")
+                if not _confirm("请输入批次ID确认", args.batch):
+                    print("批次ID不匹配，已取消")
+                    return
+
+            elif args.restore_all:
+                _print_records(records, f"将要恢复到原桶的图片（视为误判）— 全部已隔离 {len(records)} 条")
+                if args.dry_run:
+                    stats = handler.restore(records, dry_run=True)
+                    print(f"\n[DRY-RUN] 预计成功: {stats['success']}")
+                    return
+                print(f"\n⚠  即将恢复全部 {len(records)} 条已隔离记录到原桶（不可撤销）")
+                if not _confirm("确认恢复全部已隔离记录", "RESTORE-ALL"):
+                    print("已取消")
+                    return
+
+            else:  # --ids
+                _print_records(records, "将要恢复到原桶的图片（视为误判）")
+                if args.dry_run:
+                    stats = handler.restore(records, dry_run=True)
+                    print(f"\n[DRY-RUN] 预计成功: {stats['success']}")
+                    return
+                if not _confirm(f"\n确认恢复 {len(records)} 张图片到原桶"):
+                    print("已取消")
+                    return
+
             stats = handler.restore(records)
             print(f"\n完成 - 成功: {stats['success']} 失败: {stats['failed']} "
                   f"跳过: {stats['skipped']}")

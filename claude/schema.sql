@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS image_scan_records (
     
     -- 对象访问控制（三阶段处置状态）
     blocked TINYINT(1) DEFAULT 0 COMMENT '处置状态: 0-public(未处理), 1-private(隐藏观察期), 2-quarantined(已隔离)',
+    quarantine_batch_id VARCHAR(64) DEFAULT NULL COMMENT '隔离批次ID：quarantine 命令写入，支持手动指定（如 gamble_wave1）或自动生成（YYYYMMDD_HHMMSS）；同一批次ID可跨多次 quarantine 操作累积，便于整批还原',
     
     -- 时间戳
     first_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '首次发现时间',
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS image_scan_records (
     INDEX idx_feature_dhash (feature_hash_dhash),
     INDEX idx_is_violation (is_violation),
     INDEX idx_blocked (blocked),  -- 用于查询被block的文件
+    INDEX idx_quarantine_batch_id (quarantine_batch_id),  -- 用于按批次查询/还原
     INDEX idx_violation_type (violation_type),
     INDEX idx_scan_status (scan_status),
     INDEX idx_created_at (created_at),

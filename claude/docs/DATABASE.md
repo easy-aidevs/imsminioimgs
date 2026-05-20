@@ -48,6 +48,7 @@ SOURCE schema.sql;
 | `scan_status` | VARCHAR(20) | NO | pending | 扫描状态：pending/scanning/completed/failed |
 | `error_message` | TEXT | YES | NULL | 扫描失败时的错误信息 |
 | `blocked` | TINYINT | NO | 0 | **处置状态**：0=public，1=private，2=quarantined |
+| `quarantine_batch_id` | VARCHAR(64) | YES | NULL | **隔离批次ID**：quarantine 命令写入，手动指定或自动生成时间戳；同一批次ID可跨多次操作累积 |
 | `first_seen_at` | DATETIME | YES | 当前时间 | 图片首次发现时间 |
 | `last_scanned_at` | DATETIME | YES | NULL | 最后一次扫描时间 |
 | `created_at` | DATETIME | NO | 当前时间 | 记录创建时间 |
@@ -64,6 +65,9 @@ INDEX idx_is_violation (is_violation)
 
 -- 快速查询处置状态
 INDEX idx_blocked (blocked)
+
+-- 按批次查询/还原隔离图片
+INDEX idx_quarantine_batch_id (quarantine_batch_id)
 
 -- 相似图片检测
 INDEX idx_feature_hash (feature_hash)
@@ -140,26 +144,77 @@ SELECT * FROM image_scan_records WHERE violation_type = 'Gambling';
 | 值 | 状态 | 说明 | 可逆性 |
 |----|------|------|--------|
 | 0 | public（未处理） | 图片正常或已恢复 | - |
-| 1 | private（隐藏观察） | 标记为私密，无法公开访问 | 可恢复为 0（restore-public） |
-| 2 | quarantined（已隔离） | 已移到隔离桶 | **不可逆**，仅能删除 |
+| 1 | private（隐藏观察） | 历史遗留，仍在原桶 | 可 quarantine 或忽略 |
+| 2 | quarantined（已隔离） | 已物理移到隔离桶 | 可 restore 或 delete |
 
 **状态转移图**：
 ```
 扫描发现违规 (is_violation=1, blocked=0)
             ↓
-[mark-private] → blocked=1 (观察期)
+[quarantine] → blocked=2（移入隔离桶）
             ↓
     ┌─────┴─────┐
     ↓           ↓
-[confirm-quarantine] [restore-public]
-    ↓                ↓
- blocked=2        blocked=0
-(已隔离)          (已恢复)
-    ↓
-[delete]
-    ↓
-记录删除
+[restore]    [delete]
+blocked=0    记录删除
+（误判恢复）  （不可恢复）
 ```
+
+### quarantine_batch_id 字段（隔离批次）
+
+**类型**：`VARCHAR(64)`, 可为 NULL（历史记录或未指定批次的隔离）
+
+**用途**：将多次 quarantine 操作归为同一批次，便于后续整批还原。
+
+**两种来源**：
+
+| 来源 | 格式示例 | 使用场景 |
+|------|---------|---------|
+| 自动生成（时间戳） | `20260520_143022` | 日常快速隔离，不需要语义标识 |
+| 手动指定 | `gamble_wave1`、`ticket_0520_001` | 按类型/工单分批，需要整批还原 |
+
+**跨操作累积**：同一批次ID可在多次 quarantine 中重复使用，所有使用该 ID 的记录构成同一批次：
+
+```bash
+# 第一次操作：隔离赌博图片
+python handle_violations.py quarantine --sub-label Gamble --batch gamble_0520
+
+# 第二次操作：再追加几张（同一批次ID）
+python handle_violations.py quarantine --ids 10,11,12 --batch gamble_0520
+
+# 两次操作的记录都属于 gamble_0520，可一次整批还原
+python handle_violations.py restore --batch gamble_0520
+```
+
+**查询示例**：
+```sql
+-- 查看某批次的所有记录
+SELECT id, bucket_name, object_key, violation_type, quarantine_batch_id
+FROM image_scan_records
+WHERE quarantine_batch_id = 'gamble_0520';
+
+-- 查看所有批次及其数量
+SELECT quarantine_batch_id, COUNT(*) AS cnt, MIN(updated_at) AS first_quarantined
+FROM image_scan_records
+WHERE blocked = 2 AND quarantine_batch_id IS NOT NULL
+GROUP BY quarantine_batch_id
+ORDER BY first_quarantined DESC;
+```
+
+### 新增列 SQL（运维执行）
+
+> 此列在旧版表中不存在，**无需重建表，无需数据迁移**，直接在现有表上执行：
+
+```sql
+-- 新增 quarantine_batch_id 列及索引
+ALTER TABLE image_scan_records
+  ADD COLUMN quarantine_batch_id VARCHAR(64) NULL DEFAULT NULL
+    COMMENT '隔离批次ID：quarantine 命令写入，支持手动指定（如 gamble_wave1）或自动生成（YYYYMMDD_HHMMSS）；同一批次ID可跨多次 quarantine 操作累积，便于整批还原'
+    AFTER blocked,
+  ADD INDEX idx_quarantine_batch_id (quarantine_batch_id);
+```
+
+> 已有的 blocked=2 记录 `quarantine_batch_id` 默认为 NULL，不影响正常使用（`restore --ids` 仍可处理这些历史记录）。
 
 ### scan_status 字段
 
@@ -215,10 +270,24 @@ ORDER BY created_at ASC;
 ### 查看已隔离的图片
 
 ```sql
-SELECT id, object_key, violation_type, violation_label, sub_label, created_at
+-- 全部已隔离
+SELECT id, object_key, violation_type, violation_label, sub_label, quarantine_batch_id, updated_at
 FROM image_scan_records
 WHERE blocked = 2
-ORDER BY created_at DESC;
+ORDER BY updated_at DESC;
+
+-- 按批次查看
+SELECT id, object_key, violation_type, quarantine_batch_id
+FROM image_scan_records
+WHERE blocked = 2 AND quarantine_batch_id = 'gamble_0520';
+
+-- 批次汇总（各批次数量和时间）
+SELECT quarantine_batch_id, COUNT(*) AS cnt,
+       MIN(updated_at) AS first_quarantined, MAX(updated_at) AS last_quarantined
+FROM image_scan_records
+WHERE blocked = 2 AND quarantine_batch_id IS NOT NULL
+GROUP BY quarantine_batch_id
+ORDER BY first_quarantined DESC;
 ```
 
 ### 查找相似的图片
