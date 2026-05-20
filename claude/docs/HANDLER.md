@@ -6,18 +6,38 @@
 
 **核心特性**：渐进式处置，观察期内可恢复，降低误判风险。
 
+## MinIO 访问控制说明
+
+> **重要**：MinIO 不支持单个对象级 ACL，本工具的**访问控制能力按命令分两档**：
+>
+> | 命令 | MinIO 层控制 | 说明 |
+> |------|-------------|------|
+> | `mark-private` | ❌ 无 | 仅更新数据库 blocked=1，图片仍可通过 MinIO 直链访问 |
+> | `restore-public` | ❌ 无 | 仅更新数据库 blocked=0，MinIO 未变化 |
+> | `confirm-quarantine` | ✅ 有 | 物理移动到隔离桶，MinIO 层真正隔离 |
+> | `delete` | ✅ 有 | 从隔离桶彻底删除对象 |
+>
+> **应用层须配合**：在提供图片 URL 或代理下载时，查询数据库 `blocked` 字段，拒绝服务 `blocked >= 1` 的图片。
+
 ## 工作流程
 
 ```
 新增违规 (blocked=0)
-    ↓
-[mark-private] → blocked=1 (观察期 24-48 小时)
-    ↓
-    ├─→ [confirm-quarantine] → blocked=2 (隔离，不可恢复)
-    │   ↓
-    │   [delete] → 彻底删除
     │
-    └─→ [restore-public] → blocked=0 (视为误判)
+    ├─ 标准路径（需要观察期） ──────────────────────────────────┐
+    │                                                           │
+    ↓                                                           │
+[mark-private] → blocked=1 (仅 DB 标记，应用层拦截，MinIO 无变化)
+    ↓
+    ├─→ [confirm-quarantine] → blocked=2 (移入隔离桶，MinIO 真正隔离)
+    │   ↓                                                       │
+    │   [delete] → 彻底删除                                     │
+    │                                                           │
+    └─→ [restore-public] → blocked=0 (视为误判，仅 DB 回退)    │
+                                                               │
+    ├─ 快速路径（高置信度/suggestion=Block，跳过观察期） ◄──────┘
+    ↓
+[confirm-quarantine] → blocked=2 (直接移入隔离桶)
 ```
 
 ## 基本用法
@@ -154,9 +174,12 @@ $ python handle_violations.py mark-private --ids 2,3
 ```
 
 **执行效果**：
-1. 更新数据库 `blocked = 1`（MinIO 不支持单对象 ACL，图片仍在原桶）
-2. 记录到 `violations.log`
+1. 更新数据库 `blocked = 1`，记录到 `violations.log`
+2. **⚠️ MinIO 层无变化**：图片仍在原桶，通过 MinIO 直链可以访问
 3. **应用层须检查 `blocked` 字段**，拒绝对外提供 `blocked=1` 图片的 URL 或代理下载
+
+> **适用场景**：需要观察期（24-48h 监控业务日志）再决定是否隔离，且应用层已实现 `blocked` 检查。
+> 如果不需要观察期，或应用层没有 `blocked` 检查，**请直接使用 `confirm-quarantine`** 在 MinIO 层面真正隔离。
 
 ### list-private - 查看观察中的
 
@@ -213,7 +236,7 @@ $ python handle_violations.py confirm-quarantine --ids 1,2
 ```
 
 **执行效果**：
-1. 将对象从原桶移到隔离桶
+1. **物理移动**对象：原桶 → 隔离桶（MinIO 层真正隔离，原 URL 失效）
 2. 更新数据库 `blocked = 2`
 3. **此后仅能删除，不可恢复**
 4. 记录到 `violations.log`
@@ -236,7 +259,7 @@ $ python handle_violations.py restore-public --ids 3
 ```
 
 **执行效果**：
-1. 更新数据库 `blocked = 0`
+1. 更新数据库 `blocked = 0`（MinIO 层无变化，图片本来就在原桶）
 2. 应用层恢复正常返回图片，视为误判
 
 ### list-quarantined - 查看已隔离的

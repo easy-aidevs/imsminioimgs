@@ -66,9 +66,9 @@
 ```
 
 **核心机制：**
-- **私密状态**（blocked=1）：原桶中的对象，数据库标记 `blocked=1`；MinIO 不支持单对象 ACL，**由应用层检查 blocked 字段拦截访问**，仍可随时恢复
-- **隔离状态**（blocked=2）：对象移入隔离桶，只能删除，不可恢复
-- **观察期**：充分验证后再确认隔离，降低误判风险
+- **私密状态**（blocked=1）：仅数据库标记，图片仍在原桶；MinIO 不支持单对象 ACL，**访问控制完全由应用层检查 `blocked` 字段实现**，可随时恢复
+- **隔离状态**（blocked=2）：对象物理移入隔离桶（MinIO 层真正隔离），只能删除，不可恢复
+- **观察期**：充分验证后再确认隔离，降低误判风险；对高置信度明确违规可跳过直接 `confirm-quarantine`
 
 ## 快速开始
 
@@ -86,19 +86,21 @@ mysql -u root -p < schema.sql
 # 4. 扫描（需要腾讯云 IMS 凭据）
 python scanner.py
 
-# 5. 处置违规图片（三阶段流程）
+# 5. 处置违规图片
 
-# 第一阶段：标记为私密
+# 路径A：需要观察期（应用层须检查 blocked 字段）
 python handle_violations.py list                                  # 查看新增违规
-python handle_violations.py mark-private --sub-label Gamble       # 标记赌博图片为私密
-
-# 第二阶段：观察并决策
+python handle_violations.py mark-private --sub-label Gamble       # 标记为私密（仅 DB）
 python handle_violations.py list-private                          # 查看观察中的
-python handle_violations.py confirm-quarantine --ids 1,2,3        # 确认隔离
+python handle_violations.py confirm-quarantine --ids 1,2,3        # 确认隔离（MinIO 真正移桶）
 # 或
-python handle_violations.py restore-public --ids 4,5              # 改回公开
+python handle_violations.py restore-public --ids 4,5              # 视为误判，改回公开
 
-# 第三阶段：彻底删除
+# 路径B：高置信度、明确违规，跳过观察期直接 MinIO 层隔离
+python handle_violations.py list --confidence 0.9                 # 查看高置信度违规
+python handle_violations.py confirm-quarantine --ids 1,2,3        # 直接移入隔离桶
+
+# 第三阶段：彻底删除（两条路径共用）
 python handle_violations.py list-quarantined                      # 查看已隔离
 python handle_violations.py delete --ids 1,2,3                    # 删除
 ```

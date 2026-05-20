@@ -315,24 +315,41 @@ $ python handle_violations.py delete --ids 1,2
 
 ## 关键设计原则
 
-### 1. 安全第一
+### 1. MinIO 控制能力
+
+| 状态 | MinIO 层控制 | 访问能力 |
+|------|-------------|---------|
+| blocked=0 | 无（正常） | 可访问 |
+| blocked=1 | **无**（仅 DB 标记） | 仍可通过直链访问；应用层检查后拒绝 |
+| blocked=2 | **有**（移入隔离桶） | MinIO 层真正隔离，原 URL 失效 |
+
+**快速路径（跳过观察期）**：对于 `suggestion=Block`、置信度 ≥ 0.9 的明确违规，可以直接 `confirm-quarantine`，无需经过 `mark-private` 观察期。
+
+```bash
+# 查出高置信度赌博内容
+python handle_violations.py list --sub-label Gamble --confidence 0.9
+# 直接隔离（MinIO 层立即生效）
+python handle_violations.py confirm-quarantine --ids 1,2,3
+```
+
+### 2. 安全第一
 - 没有直接删除操作，必须经过三个阶段
-- 观察期内可随时恢复
+- 观察期（blocked=1）内可随时恢复
 - 每个操作都有日志记录
 
-### 2. 人工决策
+### 3. 人工决策
 - 系统标记，人工审核
 - 观察期提供反馈机会
 - 确认隔离前需明确决策
 
-### 3. 可追溯
+### 4. 可追溯
 - 完整的数据库记录
 - 所有操作有日志记录
 - 支持审计和问责
 
-### 4. 灵活恢复
-- blocked=1 时可恢复
-- blocked=2 时不可恢复（仅删除）
+### 5. 灵活恢复
+- blocked=1 时可恢复（restore-public）
+- blocked=2 时不可恢复（仅 delete）
 - 清晰的状态转移
 
 ---

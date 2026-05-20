@@ -98,7 +98,7 @@ python handle_violations.py <command> [选项]
 |------|------|------|
 | `--label <Label>` | 按 IMS 一级 Label 过滤 | `--label Illegal` |
 | `--sub-label <SubLabel>` | 按 IMS 二级 SubLabel 精细过滤 | `--sub-label Gamble` |
-| `--type <type>` | 按 violation_type 过滤 | `--type Gambling` |
+| `--type <type>` | 按 violation_type 过滤 | `--type Gamble` |
 | `--confidence <float>` | 按最低置信度过滤 | `--confidence 0.9` |
 
 **IMS 一级 Label 值**：`Polity`（政治）/ `Porn`（色情）/ `Sexy`（性感）/ `Terror`（暴恐）/ `Illegal`（违法）/ `Religion`（宗教识别）/ `Ad`（广告）/ `Teenager`（未成年识别）/ `Abuse`（谩骂）
@@ -168,9 +168,12 @@ python handle_violations.py mark-private --ids 1,2,3
 ```
 
 **执行后**：
-- 数据库记录 `blocked=1`（MinIO 不支持单对象 ACL，图片仍在原桶）
-- **应用层须检查 `blocked` 字段**，拒绝返回 `blocked=1` 的图片 URL
-- 开始观察期（24-48 小时）
+- 数据库记录 `blocked=1`，图片仍在原桶
+- **⚠️ MinIO 层无任何访问限制**：图片通过 MinIO 直链仍然可访问
+- **应用层须检查 `blocked` 字段**，在提供图片 URL 或代理下载时拒绝 `blocked=1` 的记录
+- 可随时用 `restore-public` 回退（数据库 blocked=0），或用 `confirm-quarantine` 移入隔离桶
+
+> 如果你的应用没有实现 `blocked` 字段检查，或者希望在 MinIO 层面立即限制访问，请跳过 `mark-private` 直接使用 `confirm-quarantine`。
 
 #### 3. list-private - 查看观察中的图片
 
@@ -197,7 +200,7 @@ python handle_violations.py confirm-quarantine --ids 1,2,3
 ```
 
 **执行后**：
-- 图片从原桶移到隔离桶
+- 图片从原桶**物理移动**到隔离桶（MinIO 层真正隔离）
 - 数据库记录 `blocked=2`
 - 不可恢复，只能删除
 
