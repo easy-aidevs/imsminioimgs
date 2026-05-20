@@ -18,57 +18,44 @@
 | 工具 | 作用 |
 |------|------|
 | `scanner.py` | **扫描**：遍历 MinIO 桶 → 调用腾讯云 IMS → 结果写库 |
-| `handle_violations.py` | **处置**：标记私密 → 观察决策 → 隔离/恢复/删除 |
+| `handle_violations.py` | **处置**：直接隔离（物理移桶）→ 恢复/删除 |
 
 详见 [使用指南](./docs/USAGE.md)
 
-## 处置工作流（三阶段）
+## 处置工作流（两阶段）
 
 ```
-扫描器写库（is_violation=1）
+扫描器写库（is_violation=1，对象在原桶）
         │
         ▼
   ═══════════════════════════════════════════════════════════
-   第一阶段：发现 & 标记私密（原桶，隐藏观察）
+   第一步：查看 & 隔离（MinIO 物理移动，原 URL 立即失效）
   ═══════════════════════════════════════════════════════════
         │
-        ├─→ list               查看新增违规
+        ├─→ list --suggestion Block        查看 IMS 建议拦截的违规
         │
-        ├─→ mark-private       标记为私密（数据库 blocked=1，应用层拦截）
-        │                      ↓
-        │                   [观察期 24-48 小时]
-        │                   [监控业务日志]
+        ├─→ quarantine --suggestion Block  直接隔离（对象移入隔离桶）
+        │   blocked=2，原 URL 失效
         │
-        ├─→ list-private       查看观察中的
+        ├─→ quarantine --label Illegal     按分类隔离
         │
-   ┌────┴────────────────────────────────────────────────┐
-   │                                                       │
-   │  ═══════════════════════════════════════════════════ │
-   │   第二阶段：观察决策                                  │
-   │  ═══════════════════════════════════════════════════ │
-   │                                                       │
-   ├─→ confirm-quarantine     观察正常 → 移到隔离桶        │
-   │   (blocked=2, 不可逆)                                │
-   │                                                       │
-   └─→ restore-public         观察异常 → 改回公开          │
-       (blocked=0, 视为误判)                              │
+        └─→ quarantine --ids 1,2,3         按 ID 直接隔离
+        │
+  ═══════════════════════════════════════════════════════════
+   第二步：审查 → 恢复误判 / 彻底删除
+  ═══════════════════════════════════════════════════════════
         │
         ├─→ list-quarantined    查看已隔离的
         │
-  ═══════════════════════════════════════════════════════════
-   第三阶段：彻底删除（不可恢复）
-  ═══════════════════════════════════════════════════════════
+        ├─→ restore --ids x,y   误判恢复（从隔离桶移回原桶，标记非违规）
         │
-        ├─→ delete --ids x,y    从隔离桶删除，清除记录
-        │
-        ▼
-       完成
+        └─→ delete  --ids x,y   彻底删除（不可恢复，需输入 DELETE 确认）
 ```
 
 **核心机制：**
-- **私密状态**（blocked=1）：仅数据库标记，图片仍在原桶；MinIO 不支持单对象 ACL，**访问控制完全由应用层检查 `blocked` 字段实现**，可随时恢复
-- **隔离状态**（blocked=2）：对象物理移入隔离桶（MinIO 层真正隔离），只能删除，不可恢复
-- **观察期**：充分验证后再确认隔离，降低误判风险；对高置信度明确违规可跳过直接 `confirm-quarantine`
+- **隔离状态**（blocked=2）：对象从原桶**物理移动**到隔离桶，原 URL 立即失效
+- **误判恢复**：`restore` 将对象从隔离桶物理移回原桶，并清除违规标记
+- MinIO 不支持单对象 ACL，访问控制依赖**对象所在桶**（原桶 vs 隔离桶）
 
 ## 快速开始
 
@@ -88,21 +75,24 @@ python scanner.py
 
 # 5. 处置违规图片
 
-# 路径A：需要观察期（应用层须检查 blocked 字段）
-python handle_violations.py list                                  # 查看新增违规
-python handle_violations.py mark-private --sub-label Gamble       # 标记为私密（仅 DB）
-python handle_violations.py list-private                          # 查看观察中的
-python handle_violations.py confirm-quarantine --ids 1,2,3        # 确认隔离（MinIO 真正移桶）
-# 或
-python handle_violations.py restore-public --ids 4,5              # 视为误判，改回公开
+# 查看 IMS 建议拦截的违规
+python handle_violations.py list --suggestion Block
 
-# 路径B：高置信度、明确违规，跳过观察期直接 MinIO 层隔离
-python handle_violations.py list --confidence 0.9                 # 查看高置信度违规
-python handle_violations.py confirm-quarantine --ids 1,2,3        # 直接移入隔离桶
+# 直接隔离（MinIO 物理移桶，原 URL 立即失效）
+python handle_violations.py quarantine --suggestion Block
 
-# 第三阶段：彻底删除（两条路径共用）
-python handle_violations.py list-quarantined                      # 查看已隔离
-python handle_violations.py delete --ids 1,2,3                    # 删除
+# 或按分类隔离
+python handle_violations.py quarantine --label Illegal
+python handle_violations.py quarantine --sub-label Gamble
+
+# 查看已隔离
+python handle_violations.py list-quarantined
+
+# 误判恢复（从隔离桶移回原桶）
+python handle_violations.py restore --ids 4,5
+
+# 彻底删除（需输入 DELETE 确认）
+python handle_violations.py delete --ids 1,2,3
 ```
 
 Docker 部署：`docker-compose up`
