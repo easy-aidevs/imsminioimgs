@@ -33,6 +33,7 @@ logger = setup_logger(log_dir="logs")
 #   双层查询成本：缓存O(n) + 数据库O(m)，但可避免不必要的IMS API调用。
 SIMILAR_DISTANCE_REUSE = 3
 SIMILAR_DISTANCE_MAX = 5
+WRITE_COMMIT_INTERVAL = 100   # 每处理 N 张图片提交一次事务，避免 200 万次单独 fsync
 
 
 class ImageSecurityScanner:
@@ -110,7 +111,7 @@ class ImageSecurityScanner:
         try:
             logger.info("加载已扫描图片到特征缓存...")
             scanned_images = self.db.get_all_scanned_images(
-                limit=self.cache_max_size * 10 if self.cache_strategy == 'lru' else None
+                limit=self.cache_max_size if self.cache_strategy == 'lru' else None
             )
             if not scanned_images:
                 logger.info("没有历史扫描记录")
@@ -370,12 +371,19 @@ class ImageSecurityScanner:
 
                 pbar.update(1)
 
+                # 每 WRITE_COMMIT_INTERVAL 张批量提交一次，大幅减少 fsync 次数
+                if self.stats['total'] % WRITE_COMMIT_INTERVAL == 0:
+                    self.db.commit()
+
                 # 每 1000 张打一次进度统计
                 if self.stats['total'] % 1000 == 0:
                     self._log_stats()
 
                 if limit and self.stats['total'] >= limit:
                     break
+
+            # 确保循环结束后未提交的写入不丢失
+            self.db.commit()
 
         duration = (datetime.now() - start).total_seconds()
         logger.info(f"扫描完成，耗时 {duration:.1f}s，平均 "
@@ -500,7 +508,7 @@ class ImageSecurityScanner:
                 'hash_distance': distance,
             },
         })
-        self.db.upsert_record(record)
+        self.db.upsert_record(record, auto_commit=False)
         self._add_to_feature_cache(record)
 
     def _write_ims(self, bucket: str, object_name: str, image_data: bytes,
@@ -524,7 +532,7 @@ class ImageSecurityScanner:
             },
             'ims_request_id': ims_result.get('request_id'),
         })
-        self.db.upsert_record(record)
+        self.db.upsert_record(record, auto_commit=False)
         self._add_to_feature_cache(record)
 
     def _record_error(self, bucket: str, object_name: str, err: Exception):

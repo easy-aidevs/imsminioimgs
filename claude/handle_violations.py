@@ -284,7 +284,7 @@ class ViolationHandler:
         """
         if batch_id is None:
             batch_id = datetime.now().strftime('%Y%m%d_%H%M%S')
-        stats = {'success': 0, 'failed': 0, 'skipped': 0, 'batch_id': batch_id}
+        stats = {'success': 0, 'failed': 0, 'skipped': 0, 'batch_id': batch_id, 'failed_ids': []}
         total_str = f"/{total}" if total else ""
 
         for i, r in enumerate(records, 1):
@@ -318,6 +318,7 @@ class ViolationHandler:
                 logger.info(f"[{i}{total_str}] quarantine 成功: {src_bucket}/{src_key}")
             except Exception as e:
                 stats['failed'] += 1
+                stats['failed_ids'].append(r['id'])
                 logger.error(f"[{i}{total_str}] quarantine 失败 {src_bucket}/{src_key}: {e}")
 
             if i % BATCH_SIZE == 0:
@@ -329,7 +330,7 @@ class ViolationHandler:
     def restore(self, records, dry_run: bool = False,
                 total: Optional[int] = None) -> Dict:
         """从隔离桶移回原桶，标记 blocked=0、is_violation=0（视为误判）。"""
-        stats = {'success': 0, 'failed': 0, 'skipped': 0}
+        stats = {'success': 0, 'failed': 0, 'skipped': 0, 'failed_ids': []}
         total_str = f"/{total}" if total else ""
 
         for i, r in enumerate(records, 1):
@@ -361,6 +362,7 @@ class ViolationHandler:
                 logger.info(f"[{i}{total_str}] restore 成功: {dst_bucket}/{dst_key}")
             except Exception as e:
                 stats['failed'] += 1
+                stats['failed_ids'].append(r['id'])
                 logger.error(f"[{i}{total_str}] restore 失败: {e}")
 
             if i % BATCH_SIZE == 0:
@@ -372,7 +374,7 @@ class ViolationHandler:
     def delete(self, records, dry_run: bool = False,
                total: Optional[int] = None) -> Dict:
         """从隔离桶彻底删除，并清除数据库记录。"""
-        stats = {'success': 0, 'failed': 0}
+        stats = {'success': 0, 'failed': 0, 'failed_ids': []}
         total_str = f"/{total}" if total else ""
 
         for i, r in enumerate(records, 1):
@@ -399,6 +401,7 @@ class ViolationHandler:
                 logger.info(f"[{i}{total_str}] delete 成功: {q_key}")
             except Exception as e:
                 stats['failed'] += 1
+                stats['failed_ids'].append(r['id'])
                 logger.error(f"[{i}{total_str}] delete 失败: {e}")
 
             if i % BATCH_SIZE == 0:
@@ -614,6 +617,8 @@ def main():
             )
             print(f"\n完成 - 成功: {stats['success']} 失败: {stats['failed']} "
                   f"跳过: {stats['skipped']}  批次ID: {stats['batch_id']}")
+            if stats['failed_ids']:
+                print(f"失败 ID（可用 --ids 重试）: {','.join(map(str, stats['failed_ids']))}")
 
         elif args.command == 'list-quarantined':
             batch_id = args.batch if args.batch else None
@@ -674,6 +679,8 @@ def main():
             )
             print(f"\n完成 - 成功: {stats['success']} 失败: {stats['failed']} "
                   f"跳过: {stats['skipped']}")
+            if stats['failed_ids']:
+                print(f"失败 ID（可用 --ids 重试）: {','.join(map(str, stats['failed_ids']))}")
 
         elif args.command == 'delete':
             ids = _parse_ids(args.ids)
@@ -694,6 +701,8 @@ def main():
             # 用流式迭代器确保所有指定 IDs 都被删除，不受 DISPLAY_LIMIT 限制
             stats = handler.delete(handler._iter_quarantined(ids=ids), total=total)
             print(f"\n完成 - 成功: {stats['success']} 失败: {stats['failed']}")
+            if stats['failed_ids']:
+                print(f"失败 ID（可用 --ids 重试）: {','.join(map(str, stats['failed_ids']))}")
 
     except KeyboardInterrupt:
         print("\n已中断")

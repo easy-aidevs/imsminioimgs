@@ -58,6 +58,14 @@ CREATE TABLE IF NOT EXISTS image_scan_records (
     INDEX idx_violation_type (violation_type),
     INDEX idx_scan_status (scan_status),
     INDEX idx_created_at (created_at),
-    INDEX idx_last_scanned_at (last_scanned_at)
+    INDEX idx_last_scanned_at (last_scanned_at),
+
+    -- 复合索引：handle_violations 游标分页专用（百万数据下避免全表扫描）
+    -- _fetch_quarantined_page: WHERE blocked=2 AND id>? ORDER BY id ASC
+    INDEX idx_blocked_id (blocked, id),
+    -- _fetch_violations_page: WHERE is_violation=1 AND blocked IN(0,1) AND id>? ORDER BY id ASC
+    INDEX idx_violation_blocked_id (is_violation, blocked, id),
+    -- find_similar_scanned: WHERE scan_status='completed' ORDER BY created_at DESC LIMIT 2000
+    INDEX idx_scan_status_created (scan_status, created_at)
     
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='图片内容安全扫描记录表';

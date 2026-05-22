@@ -40,15 +40,20 @@ class ImageDatabase:
         if not self.connection or not self.connection.is_connected():
             self._connect()
 
-    def execute_query(self, query: str, params: tuple = None, fetch: bool = False):
-        """执行 SQL。fetch=True 返回行列表，否则返回 lastrowid 并提交。"""
+    def execute_query(self, query: str, params: tuple = None, fetch: bool = False,
+                      auto_commit: bool = True):
+        """执行 SQL。fetch=True 返回行列表，否则返回 lastrowid。
+
+        auto_commit=False 时不自动提交，需调用方手动调用 commit()（批量写入时使用）。
+        """
         self._ensure_connection()
         cursor = self.connection.cursor(dictionary=True)
         try:
             cursor.execute(query, params or ())
             if fetch:
                 return cursor.fetchall()
-            self.connection.commit()
+            if auto_commit:
+                self.connection.commit()
             return cursor.lastrowid
         except Error as e:
             logger.error(f"SQL 执行失败: {e} | Query: {query}")
@@ -56,6 +61,11 @@ class ImageDatabase:
             raise
         finally:
             cursor.close()
+
+    def commit(self):
+        """手动提交事务，配合 auto_commit=False 批量写入使用。"""
+        self._ensure_connection()
+        self.connection.commit()
 
     # ------------------------------------------------------------------ 查询
 
@@ -118,9 +128,12 @@ class ImageDatabase:
         return similar[:10]
 
     def get_all_scanned_images(self, limit: int = None) -> List[Dict]:
-        """获取所有已扫描的图片（用于加载到缓存）。"""
+        """获取已扫描图片（用于加载到特征缓存）。只取缓存所需字段，避免加载 JSON/TEXT 大字段。"""
         query = """
-            SELECT * FROM image_scan_records
+            SELECT `key`, feature_hash, bucket_name, object_key,
+                   is_violation, violation_type, violation_label, violation_label_cn,
+                   sub_label, sub_label_cn, confidence, suggestion
+            FROM image_scan_records
             WHERE scan_status = 'completed'
             ORDER BY created_at DESC
         """
@@ -163,8 +176,11 @@ class ImageDatabase:
 
     # ------------------------------------------------------------------ 写入
 
-    def upsert_record(self, record: Dict) -> int:
-        """按 (bucket_name, object_key) 唯一约束插入或更新。"""
+    def upsert_record(self, record: Dict, auto_commit: bool = True) -> int:
+        """按 (bucket_name, object_key) 唯一约束插入或更新。
+
+        auto_commit=False 时不立即提交，调用方需手动调用 commit()（批量扫描时使用）。
+        """
         query = """
             INSERT INTO image_scan_records (
                 `key`, feature_hash, feature_hash_dhash, feature_hash_ahash,
@@ -226,7 +242,7 @@ class ImageDatabase:
             record.get('first_seen_at', now),
             record.get('last_scanned_at', now),
         )
-        return self.execute_query(query, params)
+        return self.execute_query(query, params, auto_commit=auto_commit)
 
     # ------------------------------------------------------------------ 生命周期
 
