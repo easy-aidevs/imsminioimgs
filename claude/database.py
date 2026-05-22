@@ -57,7 +57,10 @@ class ImageDatabase:
             return cursor.lastrowid
         except Error as e:
             logger.error(f"SQL 执行失败: {e} | Query: {query}")
-            self.connection.rollback()
+            if auto_commit:
+                # auto_commit=False 时不回滚：MySQL 已在语句级自动撤销失败语句，
+                # 事务中之前的成功写入需保留，由调用方在下次 commit() 时一并提交。
+                self.connection.rollback()
             raise
         finally:
             cursor.close()

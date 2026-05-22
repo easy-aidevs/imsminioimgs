@@ -111,7 +111,10 @@ class ImageSecurityScanner:
         try:
             logger.info("加载已扫描图片到特征缓存...")
             scanned_images = self.db.get_all_scanned_images(
-                limit=self.cache_max_size if self.cache_strategy == 'lru' else None
+                # 取 3x 候选记录：过滤掉不完整记录、同 hash 多路径合并后，
+                # 仍能保证 cache_max_size 的有效特征填满缓存。
+                # 新查询只取轻量字段（~500B/条），3x=30K 条约占 15MB，可接受。
+                limit=self.cache_max_size * 3 if self.cache_strategy == 'lru' else None
             )
             if not scanned_images:
                 logger.info("没有历史扫描记录")
