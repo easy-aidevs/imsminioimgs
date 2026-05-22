@@ -354,25 +354,28 @@ class ImageSecurityScanner:
         logger.info(f"开始扫描 bucket={bucket} prefix={prefix or '(无)'} "
                     f"force={force_rescan} limit={limit or '(无)'}")
 
-        objects = list(self.minio.list_objects(bucket, prefix=prefix, recursive=True))
-        if limit:
-            objects = objects[:limit]
-        logger.info(f"待处理 {len(objects)} 个图片")
-
         start = datetime.now()
-        total_objects = len(objects)
-        for object_name, _ in tqdm(objects, desc="扫描", unit="img"):
-            self.stats['total'] += 1
-            try:
-                self._process_one(bucket, object_name, force_rescan)
-            except Exception as e:
-                self.stats['errors'] += 1
-                logger.error(f"处理失败 [{object_name}]: {e}")
-                self._record_error(bucket, object_name, e)
+        # 使用生成器流式遍历，避免将百万对象列表加载到内存
+        object_iter = self.minio.list_objects(bucket, prefix=prefix, recursive=True)
 
-            # 每 100 张打一次进度统计；最后一张留给循环外的最终统计打印。
-            if self.stats['total'] % 100 == 0 and self.stats['total'] != total_objects:
-                self._log_stats()
+        with tqdm(desc="扫描", unit="img") as pbar:
+            for object_name, _ in object_iter:
+                self.stats['total'] += 1
+                try:
+                    self._process_one(bucket, object_name, force_rescan)
+                except Exception as e:
+                    self.stats['errors'] += 1
+                    logger.error(f"处理失败 [{object_name}]: {e}")
+                    self._record_error(bucket, object_name, e)
+
+                pbar.update(1)
+
+                # 每 1000 张打一次进度统计
+                if self.stats['total'] % 1000 == 0:
+                    self._log_stats()
+
+                if limit and self.stats['total'] >= limit:
+                    break
 
         duration = (datetime.now() - start).total_seconds()
         logger.info(f"扫描完成，耗时 {duration:.1f}s，平均 "
