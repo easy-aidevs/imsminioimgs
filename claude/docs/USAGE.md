@@ -112,6 +112,7 @@ python handle_violations.py <command> [选项]
 | `--type <type>` | 按 violation_type 过滤 | `--type Gamble` |
 | `--suggestion <s>` | 按 IMS 建议过滤 | `--suggestion Block` |
 | `--confidence <float>` | 按最低置信度过滤 | `--confidence 0.9` |
+| `--prefix <路径前缀>` | 按 object_key 路径前缀过滤 | `--prefix uploads/2026/` |
 
 **IMS 建议值**：`Block`（建议拦截）/ `Review`（需人工审核）/ `Pass`（通过）
 
@@ -126,7 +127,7 @@ python handle_violations.py <command> [选项]
 #### 1. list - 查看待处理违规
 
 ```bash
-python handle_violations.py list [--type <type>] [--sub-label <sub_label>] [--label <label>] [--suggestion <s>] [--confidence <float>] [--ids <ids>]
+python handle_violations.py list [--type <type>] [--sub-label <sub_label>] [--label <label>] [--suggestion <s>] [--confidence <float>] [--prefix <路径前缀>] [--ids <ids>]
 ```
 
 **输出示例**：
@@ -146,12 +147,14 @@ python handle_violations.py list --suggestion Block
 python handle_violations.py list --sub-label Gamble
 python handle_violations.py list --label Illegal
 python handle_violations.py list --confidence 0.9
+python handle_violations.py list --prefix uploads/2026/05/       # 只看某月上传的违规
+python handle_violations.py list --prefix uploads/2026/ --suggestion Block  # 前缀 + 建议拦截
 ```
 
 #### 2. quarantine - 隔离（MinIO 物理移动）
 
 ```bash
-python handle_violations.py quarantine [--ids <ids>] [--suggestion <s>] [--label <label>] [--sub-label <sub_label>] [--type <type>] [--confidence <float>] [--batch <batch_id>] [--dry-run]
+python handle_violations.py quarantine [--ids <ids>] [--suggestion <s>] [--label <label>] [--sub-label <sub_label>] [--type <type>] [--confidence <float>] [--prefix <路径前缀>] [--batch <batch_id>] [--dry-run]
 ```
 
 **选项**：
@@ -160,6 +163,7 @@ python handle_violations.py quarantine [--ids <ids>] [--suggestion <s>] [--label
 - `--label <label>`：按 IMS 一级 Label 过滤
 - `--sub-label <sub_label>`：按 IMS SubLabel 过滤
 - `--confidence <float>`：按最低置信度过滤
+- `--prefix <路径前缀>`：按 object_key 路径前缀过滤（仅处理该目录下的对象）
 - `--batch <batch_id>`：手动指定批次ID（留空则自动生成时间戳 `YYYYMMDD_HHMMSS`）
 - `--dry-run`：预演，不实际执行（展示批次ID预览值）
 
@@ -182,6 +186,10 @@ python handle_violations.py quarantine --suggestion Block
 # 手动批次ID（执行前显示并确认）
 python handle_violations.py quarantine --label Illegal --batch illegal_0520
 python handle_violations.py quarantine --sub-label Gamble --batch gamble_wave1 --confidence 0.9
+
+# 按路径前缀隔离（只处理指定目录下的违规）
+python handle_violations.py quarantine --prefix uploads/2026/05/
+python handle_violations.py quarantine --prefix uploads/2026/05/ --suggestion Block --batch may_block_0520
 
 # 按 ID 直接隔离
 python handle_violations.py quarantine --ids 1,2,3
@@ -324,7 +332,27 @@ $ python handle_violations.py quarantine --label Porn --batch porn_0520
 $ python handle_violations.py list-quarantined --batch gamble_0520
 ```
 
-### 场景 3：发现整批误判，按批次恢复
+### 场景 3：只处理某个目录（路径前缀）下的违规
+
+```bash
+# 1. 先看看这个目录有多少违规
+$ python handle_violations.py list --prefix uploads/2026/05/
+待处理的违规图片（原桶）（共 8 条）
+...
+
+# 2. 只隔离该目录中 IMS 建议拦截的，打一个语义化批次ID
+$ python handle_violations.py quarantine --prefix uploads/2026/05/ --suggestion Block --batch may2026_block
+批次ID（手动指定）：may2026_block
+确认以批次ID [may2026_block] 隔离 6 张图片... (输入 yes 确认): yes
+完成 - 成功: 6 失败: 0 跳过: 0  批次ID: may2026_block
+
+# 3. 前缀可与任意过滤条件组合
+$ python handle_violations.py list --prefix uploads/2026/05/ --label Porn --confidence 0.85
+```
+
+> `--prefix` 匹配 `object_key` 的开头，支持任意深度路径，如 `uploads/`、`uploads/2026/`、`uploads/2026/05/01/`。
+
+### 场景 4：发现整批误判，按批次恢复
 
 ```bash
 # 查看批次内容
