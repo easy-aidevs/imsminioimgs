@@ -66,6 +66,7 @@ class ViolationHandler:
                         suggestion: str = None,
                         ids: List[int] = None,
                         prefix: str = None,
+                        bucket: str = None,
                         limit: int = None) -> List[Dict]:
         """列出原桶中的违规图片（blocked=0 或旧版 blocked=1，均在原桶未被隔离）。
 
@@ -101,6 +102,9 @@ class ViolationHandler:
         if prefix:
             query += " AND object_key LIKE %s"
             params.append(prefix + '%')
+        if bucket:
+            query += " AND bucket_name = %s"
+            params.append(bucket)
         query += " ORDER BY violation_label, sub_label, confidence DESC"
         if limit is not None:
             query += " LIMIT %s"
@@ -113,7 +117,8 @@ class ViolationHandler:
                          confidence: float = 0.0,
                          suggestion: str = None,
                          ids: List[int] = None,
-                         prefix: str = None) -> int:
+                         prefix: str = None,
+                         bucket: str = None) -> int:
         """返回符合条件的违规记录总数。"""
         query = """
             SELECT COUNT(*) AS c FROM image_scan_records
@@ -142,6 +147,9 @@ class ViolationHandler:
         if prefix:
             query += " AND object_key LIKE %s"
             params.append(prefix + '%')
+        if bucket:
+            query += " AND bucket_name = %s"
+            params.append(bucket)
         result = self.db.execute_query(query, tuple(params) if params else None, fetch=True)
         return result[0]['c'] if result else 0
 
@@ -196,7 +204,8 @@ class ViolationHandler:
     def _fetch_violations_page(self, after_id: int,
                                violation_type: str = None, sub_label: str = None,
                                violation_label: str = None, confidence: float = 0.0,
-                               suggestion: str = None, prefix: str = None) -> List[Dict]:
+                               suggestion: str = None, prefix: str = None,
+                               bucket: str = None) -> List[Dict]:
         """用游标方式取一页违规记录（id > after_id），供流式迭代使用。"""
         query = """
             SELECT id, bucket_name, object_key, violation_type,
@@ -224,6 +233,9 @@ class ViolationHandler:
         if prefix:
             query += " AND object_key LIKE %s"
             params.append(prefix + '%')
+        if bucket:
+            query += " AND bucket_name = %s"
+            params.append(bucket)
         query += " ORDER BY id ASC LIMIT %s"
         params.append(BATCH_SIZE)
         return self.db.execute_query(query, tuple(params), fetch=True)
@@ -232,7 +244,8 @@ class ViolationHandler:
                          violation_label: str = None, confidence: float = 0.0,
                          suggestion: str = None,
                          ids: List[int] = None,
-                         prefix: str = None) -> Generator[Dict, None, None]:
+                         prefix: str = None,
+                         bucket: str = None) -> Generator[Dict, None, None]:
         """流式生成违规记录，每批 BATCH_SIZE 条，不将全量加载到内存。
 
         ids 指定时（有限集合）直接一次性加载；过滤条件查询时使用游标分页。
@@ -240,13 +253,14 @@ class ViolationHandler:
         """
         if ids:
             yield from self.list_violations(violation_type, sub_label, violation_label,
-                                            confidence, suggestion, ids, prefix=prefix)
+                                            confidence, suggestion, ids, prefix=prefix,
+                                            bucket=bucket)
             return
         after_id = 0
         while True:
             batch = self._fetch_violations_page(after_id, violation_type, sub_label,
                                                 violation_label, confidence, suggestion,
-                                                prefix=prefix)
+                                                prefix=prefix, bucket=bucket)
             if not batch:
                 break
             yield from batch
@@ -531,6 +545,7 @@ def main():
     p_list.add_argument('--confidence', type=float, default=0.0, help='置信度阈值（0–1）')
     p_list.add_argument('--ids', help='指定记录 ID，逗号分隔')
     p_list.add_argument('--prefix', help='按 object_key 路径前缀过滤（如 uploads/2026/）')
+    p_list.add_argument('--bucket', help='按桶名过滤（如 images）')
 
     # quarantine
     p_quarantine = sub.add_parser('quarantine', help='隔离违规图片（MinIO 物理移入隔离桶）')
@@ -541,6 +556,7 @@ def main():
     p_quarantine.add_argument('--label', dest='violation_label', help='IMS 一级 Label 过滤')
     p_quarantine.add_argument('--confidence', type=float, default=0.0, help='置信度阈值')
     p_quarantine.add_argument('--prefix', help='按 object_key 路径前缀过滤（如 uploads/2026/）')
+    p_quarantine.add_argument('--bucket', help='按桶名过滤（如 images）')
     p_quarantine.add_argument('--batch', dest='batch_id',
                               help='手动指定批次ID（留空则自动生成时间戳，如 20260520_143022）')
     p_quarantine.add_argument('--dry-run', action='store_true', help='预演，不实际执行')
@@ -578,6 +594,7 @@ def main():
                 suggestion=args.suggestion,
                 ids=ids,
                 prefix=args.prefix or None,
+                bucket=args.bucket or None,
             )
             total = handler.count_violations(**filter_kwargs)
             preview = handler.list_violations(**filter_kwargs, limit=DISPLAY_LIMIT)
@@ -593,6 +610,7 @@ def main():
                 suggestion=args.suggestion,
                 ids=ids,
                 prefix=getattr(args, 'prefix', None) or None,
+                bucket=getattr(args, 'bucket', None) or None,
             )
 
             total = handler.count_violations(**filter_kwargs)

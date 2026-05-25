@@ -113,6 +113,7 @@ python handle_violations.py <command> [选项]
 | `--suggestion <s>` | 按 IMS 建议过滤 | `--suggestion Block` |
 | `--confidence <float>` | 按最低置信度过滤 | `--confidence 0.9` |
 | `--prefix <路径前缀>` | 按 object_key 路径前缀过滤 | `--prefix uploads/2026/` |
+| `--bucket <桶名>` | 按 bucket_name 精确过滤 | `--bucket images` |
 
 **IMS 建议值**：`Block`（建议拦截）/ `Review`（需人工审核）/ `Pass`（通过）
 
@@ -127,7 +128,7 @@ python handle_violations.py <command> [选项]
 #### 1. list - 查看待处理违规
 
 ```bash
-python handle_violations.py list [--type <type>] [--sub-label <sub_label>] [--label <label>] [--suggestion <s>] [--confidence <float>] [--prefix <路径前缀>] [--ids <ids>]
+python handle_violations.py list [--type <type>] [--sub-label <sub_label>] [--label <label>] [--suggestion <s>] [--confidence <float>] [--prefix <路径前缀>] [--bucket <桶名>] [--ids <ids>]
 ```
 
 **输出示例**：
@@ -149,12 +150,14 @@ python handle_violations.py list --label Illegal
 python handle_violations.py list --confidence 0.9
 python handle_violations.py list --prefix uploads/2026/05/       # 只看某月上传的违规
 python handle_violations.py list --prefix uploads/2026/ --suggestion Block  # 前缀 + 建议拦截
+python handle_violations.py list --bucket images                 # 只看某个桶的违规
+python handle_violations.py list --bucket images --prefix uploads/2026/     # 桶 + 前缀组合
 ```
 
 #### 2. quarantine - 隔离（MinIO 物理移动）
 
 ```bash
-python handle_violations.py quarantine [--ids <ids>] [--suggestion <s>] [--label <label>] [--sub-label <sub_label>] [--type <type>] [--confidence <float>] [--prefix <路径前缀>] [--batch <batch_id>] [--dry-run]
+python handle_violations.py quarantine [--ids <ids>] [--suggestion <s>] [--label <label>] [--sub-label <sub_label>] [--type <type>] [--confidence <float>] [--prefix <路径前缀>] [--bucket <桶名>] [--batch <batch_id>] [--dry-run]
 ```
 
 **选项**：
@@ -164,6 +167,7 @@ python handle_violations.py quarantine [--ids <ids>] [--suggestion <s>] [--label
 - `--sub-label <sub_label>`：按 IMS SubLabel 过滤
 - `--confidence <float>`：按最低置信度过滤
 - `--prefix <路径前缀>`：按 object_key 路径前缀过滤（仅处理该目录下的对象）
+- `--bucket <桶名>`：按 bucket_name 精确过滤（仅处理指定桶内的对象）
 - `--batch <batch_id>`：手动指定批次ID（留空则自动生成时间戳 `YYYYMMDD_HHMMSS`）
 - `--dry-run`：预演，不实际执行（展示批次ID预览值）
 
@@ -190,6 +194,10 @@ python handle_violations.py quarantine --sub-label Gamble --batch gamble_wave1 -
 # 按路径前缀隔离（只处理指定目录下的违规）
 python handle_violations.py quarantine --prefix uploads/2026/05/
 python handle_violations.py quarantine --prefix uploads/2026/05/ --suggestion Block --batch may_block_0520
+
+# 按桶名隔离（只处理指定桶内的违规）
+python handle_violations.py quarantine --bucket images --suggestion Block
+python handle_violations.py quarantine --bucket images --prefix uploads/2026/ --batch images_may_0520
 
 # 按 ID 直接隔离
 python handle_violations.py quarantine --ids 1,2,3
